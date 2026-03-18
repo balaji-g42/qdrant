@@ -107,16 +107,29 @@ pub fn welcome(settings: &Settings) {
         git_commit_info
     );
 
+    let base_path = settings
+        .service
+        .base_path
+        .as_deref()
+        .unwrap_or("/")
+        .trim_end_matches('/');
+    let dashboard_path = if base_path.is_empty() {
+        "/dashboard".to_string()
+    } else {
+        format!("{base_path}/dashboard")
+    };
+
     // Print link to web UI
     let ui_link = format!(
-        "http{}://{}:{}/dashboard",
+        "http{}://{}:{}{}",
         if settings.service.enable_tls { "s" } else { "" },
         if is_localhost_ip(&settings.service.host) {
             "localhost"
         } else {
             &settings.service.host
         },
-        settings.service.http_port
+        settings.service.http_port,
+        dashboard_path
     );
 
     println!(
