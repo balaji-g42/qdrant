@@ -10,6 +10,16 @@ cd "$(dirname "$0")/../"
 export QDRANT__SERVICE__HOST="0.0.0.0"
 export QDRANT__SERVICE__API_KEY="my-secret"
 export QDRANT__SERVICE__READ_ONLY_API_KEY="my-ro-secret"
+QDRANT_BASE_PATH="${QDRANT_BASE_PATH:-}"
+if [ -n "$QDRANT_BASE_PATH" ] && [ "$QDRANT_BASE_PATH" != "/" ]; then
+    QDRANT_BASE_PATH="/${QDRANT_BASE_PATH#/}"
+    QDRANT_BASE_PATH="${QDRANT_BASE_PATH%/}"
+    export QDRANT_BASE_PATH
+    export QDRANT__SERVICE__BASE_PATH="$QDRANT_BASE_PATH"
+else
+    QDRANT_BASE_PATH=""
+    export QDRANT_BASE_PATH
+fi
 
 ./target/debug/qdrant &
 
@@ -26,7 +36,7 @@ function clear_after_tests()
 trap clear_after_tests EXIT
 
 QDRANT_HOST='localhost'
-until curl --output /dev/null --silent --get --fail -H 'api-key: my-ro-secret' http://$QDRANT_HOST:6333/collections; do
+until curl --output /dev/null --silent --get --fail -H 'api-key: my-ro-secret' http://$QDRANT_HOST:6333$QDRANT_BASE_PATH/collections; do
     printf 'waiting for server to start...'
     sleep 5
 done
@@ -36,5 +46,6 @@ echo "server ready to serve traffic"
 IMAGE_NAME=$(docker buildx build --load -q "tests/api_key")
 docker run --rm \
        -e QDRANT_HOST=host.docker.internal \
+       -e QDRANT_BASE_PATH="$QDRANT_BASE_PATH" \
        --add-host host.docker.internal:host-gateway \
        $IMAGE_NAME sh -c "pytest /tests"

@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import random
 import requests
 import time
@@ -12,15 +13,30 @@ from qdrant_client import QdrantClient, models
 VECTOR_SIZE = 4
 
 
+def _normalize_base_path(base_path: str) -> str:
+    if base_path and base_path != "/":
+        return "/" + base_path.strip("/")
+    return ""
+
+
 class ClientUtils:
     """Utility class for Qdrant operations using qdrant-client."""
 
-    def __init__(self, host: str = "localhost", port: int = 6333, timeout: int = 60):
+    def __init__(self, host: str = "localhost", port: int = 6333, timeout: int = 60, base_path: Optional[str] = None):
         """Initialize the ClientUtils with a QdrantClient instance."""
         self.host = host
         self.port = port
         self.timeout = timeout
-        self.client = QdrantClient(host=host, port=port, timeout=timeout)
+        env_base_path = os.environ.get("QDRANT_BASE_PATH", "")
+        self.base_path = _normalize_base_path(base_path if base_path is not None else env_base_path)
+
+        if self.base_path:
+            self.client = QdrantClient(url=f"http://{host}:{port}{self.base_path}", timeout=timeout)
+        else:
+            self.client = QdrantClient(host=host, port=port, timeout=timeout)
+
+    def _url(self, path: str) -> str:
+        return f"http://{self.host}:{self.port}{self.base_path}{path}"
 
     def wait_for_server(self, timeout: int = 30) -> bool:
         """Wait for Qdrant server to be ready."""
@@ -324,7 +340,7 @@ class ClientUtils:
         """Download a snapshot and return its content and checksum."""
         # Note: qdrant-client doesn't have a direct method to download snapshot content
         # This would need to be implemented using the REST API directly
-        snapshot_url = f"http://{self.host}:{self.port}/collections/{collection_name}/snapshots/{snapshot_name}"
+        snapshot_url = self._url(f"/collections/{collection_name}/snapshots/{snapshot_name}")
         response = requests.get(snapshot_url)
         response.raise_for_status()
 
@@ -344,7 +360,7 @@ class ClientUtils:
             body["checksum"] = checksum
 
         response = requests.put(
-            f"http://{self.host}:{self.port}/collections/{collection_name}/snapshots/recover",
+            self._url(f"/collections/{collection_name}/snapshots/recover"),
             json=body
         )
         if not response.ok:
@@ -361,7 +377,7 @@ class ClientUtils:
         }
 
         response = requests.post(
-            f"http://{self.host}:{self.port}/collections/{collection_name}/snapshots/upload",
+            self._url(f"/collections/{collection_name}/snapshots/upload"),
             files=files
         )
         response.raise_for_status()
@@ -379,7 +395,7 @@ class ClientUtils:
         """Download a shard snapshot and return its content."""
         # Note: qdrant-client doesn't have a direct method to download shard snapshot content
         # This would need to be implemented using the REST API directly
-        snapshot_url = f"http://{self.host}:{self.port}/collections/{collection_name}/shards/{shard_id}/snapshots/{snapshot_name}"
+        snapshot_url = self._url(f"/collections/{collection_name}/shards/{shard_id}/snapshots/{snapshot_name}")
         response = requests.get(snapshot_url)
         response.raise_for_status()
         return response.content
@@ -403,7 +419,7 @@ class ClientUtils:
         }
 
         response = requests.post(
-            f"http://{self.host}:{self.port}/collections/{collection_name}/shards/{shard_id}/snapshots/upload",
+            self._url(f"/collections/{collection_name}/shards/{shard_id}/snapshots/upload"),
             files=files
         )
         response.raise_for_status()

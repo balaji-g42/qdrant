@@ -5,14 +5,24 @@
 set -ex
 
 QDRANT_HOST='localhost:6333'
+QDRANT_BASE_PATH=${QDRANT_BASE_PATH:-}
+
+if [ -n "$QDRANT_BASE_PATH" ] && [ "$QDRANT_BASE_PATH" != "/" ]; then
+  QDRANT_BASE_PATH="/${QDRANT_BASE_PATH#/}"
+  QDRANT_BASE_PATH="${QDRANT_BASE_PATH%/}"
+else
+  QDRANT_BASE_PATH=""
+fi
+
+BASE_URL="http://$QDRANT_HOST$QDRANT_BASE_PATH"
 
 # cleanup collection if it exists
-curl -X DELETE "http://$QDRANT_HOST/collections/test_collection" \
+curl -X DELETE "$BASE_URL/collections/test_collection" \
   -H 'Content-Type: application/json' \
   --fail -s | jq
 
 # create collection
-curl -X PUT "http://$QDRANT_HOST/collections/test_collection" \
+curl -X PUT "$BASE_URL/collections/test_collection" \
   -H 'Content-Type: application/json' \
   --fail -s \
   --data-raw '{
@@ -41,7 +51,7 @@ do
       ]}')
 
   # insert points
-  curl -L -X PUT "http://$QDRANT_HOST/collections/test_collection/points?wait=true" \
+  curl -L -X PUT "$BASE_URL/collections/test_collection/points?wait=true" \
     -H 'Content-Type: application/json' \
     --fail -s \
     --data-raw "$PAYLOAD" | jq
@@ -63,7 +73,7 @@ PAYLOAD='
 ';
 
 # insert points
-curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points/delete?wait=true" \
+curl -L -X POST "$BASE_URL/collections/test_collection/points/delete?wait=true" \
   -H 'Content-Type: application/json' \
   --fail -s \
   --data-raw "$PAYLOAD" | jq
@@ -84,7 +94,7 @@ do
       ]}')
 
   # insert points
-  curl -L -X PUT "http://$QDRANT_HOST/collections/test_collection/points?wait=true" \
+  curl -L -X PUT "$BASE_URL/collections/test_collection/points?wait=true" \
     -H 'Content-Type: application/json' \
     --fail -s \
     --data-raw "$PAYLOAD" | jq

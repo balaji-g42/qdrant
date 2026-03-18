@@ -17,6 +17,12 @@ from docker.errors import NotFound
 from .models import QdrantContainer, QdrantContainerConfig, QdrantDockerCluster
 
 
+def _normalize_base_path(base_path: str) -> str:
+    if base_path and base_path != "/":
+        return "/" + base_path.strip("/")
+    return ""
+
+
 def remove_dir(path: Path) -> None:
     """Remove a directory and all its contents.
 
@@ -30,10 +36,11 @@ def remove_dir(path: Path) -> None:
 
 def wait_for_qdrant_ready(port: int = 6333, timeout: int = 30) -> bool:
     """Wait for Qdrant service to be ready."""
+    base_path = _normalize_base_path(os.environ.get("QDRANT_BASE_PATH", ""))
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            response = requests.get(f"http://localhost:{port}/readyz")
+            response = requests.get(f"http://localhost:{port}{base_path}/readyz")
             if response.status_code == 200:
                 return True
         except requests.exceptions.ConnectionError:

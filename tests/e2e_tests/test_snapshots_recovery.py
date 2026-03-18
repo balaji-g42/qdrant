@@ -1,6 +1,7 @@
 import pytest
 import requests
 import yaml
+import os
 from pathlib import Path
 
 from e2e_tests.client_utils import ClientUtils
@@ -11,7 +12,15 @@ RECOVERED_URL = "test_collection_recovered_url"
 RECOVERED_FILE = "test_collection_recovered_file"
 NUM_BATCHES = 2
 EXPECTED_POINTS = NUM_BATCHES * 100  # generate_points yields 100 points per batch
-INTERNAL_QDRANT_URL = "http://localhost:6333"
+
+
+def _internal_qdrant_url() -> str:
+    base_path = os.environ.get("QDRANT_BASE_PATH", "")
+    if base_path and base_path != "/":
+        base_path = "/" + base_path.strip("/")
+    else:
+        base_path = ""
+    return f"http://localhost:6333{base_path}"
 
 
 def _s3_config() -> dict:
@@ -97,7 +106,7 @@ class TestSnapshotsRecovery:
         assert snapshot_content, "Downloaded snapshot is empty"
 
         # Recover from URL (server fetches from itself via internal address)
-        snapshot_url = f"{INTERNAL_QDRANT_URL}/collections/{COLLECTION_NAME}/snapshots/{snapshot_name}"
+        snapshot_url = f"{_internal_qdrant_url()}/collections/{COLLECTION_NAME}/snapshots/{snapshot_name}"
         client.recover_snapshot_from_url(RECOVERED_URL, snapshot_url, snapshot_checksum)
         _verify_recovered(client, RECOVERED_URL, original_config)
 
@@ -114,7 +123,7 @@ class TestSnapshotsRecovery:
         assert shard_snapshot_content, "Downloaded shard snapshot is empty"
 
         # Recover shard from URL
-        shard_url = f"{INTERNAL_QDRANT_URL}/collections/{COLLECTION_NAME}/shards/0/snapshots/{shard_snapshot_name}"
+        shard_url = f"{_internal_qdrant_url()}/collections/{COLLECTION_NAME}/shards/0/snapshots/{shard_snapshot_name}"
         client.recover_shard_snapshot_from_url(RECOVERED_URL, 0, shard_url)
 
         # Recover shard from uploaded file

@@ -18,10 +18,12 @@ jobs:
     - name: Install minimal nightly (only for fmt)
       uses: dtolnay/rust-toolchain@nightly
       with:
+        toolchain: nightly
         components: rustfmt
     - name: Install minimal stable
       uses: dtolnay/rust-toolchain@stable
       with:
+        toolchain: stable
         components: rustfmt, clippy
     - uses: actions/checkout@v6
     - name: Install Protoc

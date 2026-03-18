@@ -7,6 +7,7 @@ declare QDRANT_HOST="${QDRANT_HOST:-localhost}"
 
 declare QDRANT_HTTP_PORT="${QDRANT_HTTP_PORT:-6333}"
 declare QDRANT_GRPC_PORT="${QDRANT_GRPC_PORT:-6334}"
+declare QDRANT_BASE_PATH="${QDRANT_BASE_PATH:-}"
 
 
 declare BFB="${BFB-}"
@@ -46,7 +47,7 @@ function main {
 function load-qdrant-status {
 	if [[ ! $CLUSTER ]]
 	then
-		declare STATUS ; STATUS="$(curl-ok "http://$QDRANT_HOST:$QDRANT_HTTP_PORT/cluster" | jq -r .result.status)"
+		declare STATUS ; STATUS="$(curl-ok "http://$QDRANT_HOST:$QDRANT_HTTP_PORT$(base-path-prefix)/cluster" | jq -r .result.status)"
 
 		case "$STATUS" in
 			enabled) CLUSTER=1 ;;
@@ -570,7 +571,7 @@ function url {
 	fi
 
 
-	declare URL="$QDRANT_HOST:$QDRANT_HTTP_PORT"
+	declare URL="$QDRANT_HOST:$QDRANT_HTTP_PORT$(base-path-prefix)"
 
 	if (( $# <= 1 ))
 	then
@@ -584,6 +585,21 @@ function url {
 	else
 		echo "url: expected no more than 3 arguments (collection, shard, snapshot), but received $# (${*})" >&2
 		return 1
+	fi
+}
+
+function base-path-prefix {
+	if [[ -z "$QDRANT_BASE_PATH" || "$QDRANT_BASE_PATH" == "/" ]]
+	then
+		echo ""
+	else
+		# Ensure leading slash and no trailing slash
+		local prefix="${QDRANT_BASE_PATH%/}"
+		if [[ "$prefix" != /* ]]
+		then
+			prefix="/$prefix"
+		fi
+		echo "$prefix"
 	fi
 }
 

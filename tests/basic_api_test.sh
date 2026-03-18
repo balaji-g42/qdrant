@@ -4,6 +4,16 @@
 set -ex
 
 QDRANT_HOST=${QDRANT_HOST:-'localhost:6333'}
+QDRANT_BASE_PATH=${QDRANT_BASE_PATH:-}
+
+if [ -n "$QDRANT_BASE_PATH" ] && [ "$QDRANT_BASE_PATH" != "/" ]; then
+  QDRANT_BASE_PATH="/${QDRANT_BASE_PATH#/}"
+  QDRANT_BASE_PATH="${QDRANT_BASE_PATH%/}"
+else
+  QDRANT_BASE_PATH=""
+fi
+
+BASE_URL="http://$QDRANT_HOST$QDRANT_BASE_PATH"
 
 qdrant_host_headers=()
 
@@ -14,12 +24,12 @@ if [ -n "${QDRANT_HOST_HEADERS}" ]; then
 fi
 
 # cleanup collection if it exists
-curl -X DELETE "http://$QDRANT_HOST/collections/test_collection" \
+curl -X DELETE "$BASE_URL/collections/test_collection" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s | jq
 
 # create collection
-curl -X PUT "http://$QDRANT_HOST/collections/test_collection" \
+curl -X PUT "$BASE_URL/collections/test_collection" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
@@ -33,7 +43,7 @@ curl -X PUT "http://$QDRANT_HOST/collections/test_collection" \
       "replication_factor": 2
     }' | jq
 
-curl -L -X PUT  "http://$QDRANT_HOST/collections/test_collection/index" \
+curl -L -X PUT  "$BASE_URL/collections/test_collection/index" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
@@ -41,7 +51,7 @@ curl -L -X PUT  "http://$QDRANT_HOST/collections/test_collection/index" \
       "field_schema": "keyword"
     }' | jq
 
-curl -L -X PUT  "http://$QDRANT_HOST/collections/test_collection/index" \
+curl -L -X PUT  "$BASE_URL/collections/test_collection/index" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
@@ -49,7 +59,7 @@ curl -L -X PUT  "http://$QDRANT_HOST/collections/test_collection/index" \
       "field_schema": "integer"
     }' | jq
 
-curl -L -X PUT  "http://$QDRANT_HOST/collections/test_collection/index" \
+curl -L -X PUT  "$BASE_URL/collections/test_collection/index" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
@@ -57,10 +67,10 @@ curl -L -X PUT  "http://$QDRANT_HOST/collections/test_collection/index" \
       "field_schema": "geo"
     }' | jq
 
-curl --fail -s "http://$QDRANT_HOST/collections/test_collection" "${qdrant_host_headers[@]-}" | jq
+curl --fail -s "$BASE_URL/collections/test_collection" "${qdrant_host_headers[@]-}" | jq
 
 # insert points
-curl -L -X PUT "http://$QDRANT_HOST/collections/test_collection/points?wait=true" \
+curl -L -X PUT "$BASE_URL/collections/test_collection/points?wait=true" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
@@ -85,26 +95,26 @@ curl -L -X PUT "http://$QDRANT_HOST/collections/test_collection/points?wait=true
     }' | jq
 
 # retrieve point
-curl -L -X GET "http://$QDRANT_HOST/collections/test_collection/points/2" \
+curl -L -X GET "$BASE_URL/collections/test_collection/points/2" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s | jq
 
 # retrieve points
-curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points" \
+curl -L -X POST "$BASE_URL/collections/test_collection/points" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
       "ids": [1, 2]
     }' | jq
 
-SAVED_POINTS_COUNT=$(curl --fail -s "http://$QDRANT_HOST/collections/test_collection" "${qdrant_host_headers[@]}" | jq '.result.points_count')
+SAVED_POINTS_COUNT=$(curl --fail -s "$BASE_URL/collections/test_collection" "${qdrant_host_headers[@]}" | jq '.result.points_count')
 [[ "$SAVED_POINTS_COUNT" == "6" ]] || {
   echo 'check failed - 6 points expected'
   exit 1
 }
 
 # search points
-curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points/search" \
+curl -L -X POST "$BASE_URL/collections/test_collection/points/search" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
@@ -113,7 +123,7 @@ curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points/search" 
     }' | jq
 
 # search points batch
-curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points/search/batch" \
+curl -L -X POST "$BASE_URL/collections/test_collection/points/search/batch" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
@@ -129,7 +139,7 @@ curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points/search/b
     ]
   }' | jq
 
-curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points/search" \
+curl -L -X POST "$BASE_URL/collections/test_collection/points/search" \
   --fail -s \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --data-raw '{
@@ -148,7 +158,7 @@ curl -L -X POST "http://$QDRANT_HOST/collections/test_collection/points/search" 
   }' | jq
 
 # test double forward slash handling
-curl -L -X POST "http://$QDRANT_HOST//collections/test_collection/points/search/" \
+curl -L -X POST "$BASE_URL//collections/test_collection/points/search/" \
   -H 'Content-Type: application/json' "${qdrant_host_headers[@]}" \
   --fail -s \
   --data-raw '{
