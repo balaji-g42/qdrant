@@ -7,6 +7,7 @@
 /consensus_test_logs
 /tests/consensus_test_logs
 /config/local
+/actions-runner
 /tls
 /static
 *.log
