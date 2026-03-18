@@ -249,7 +249,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          tags: qdrant/qdrant:e2e-tests
+          tags: balajig4292/qdrant:e2e-tests
           cache-from: |
             type=gha,scope=${{ github.ref }}-e2e
             type=gha,scope=${{ github.base_ref }}-e2e

@@ -75,6 +75,8 @@ pub struct ServiceConfig {
     #[serde(default)]
     #[validate(custom(function = validate_metrics_prefix))]
     pub metrics_prefix: Option<String>,
+    #[serde(default)]
+    pub base_path: Option<String>,
 }
 
 impl ServiceConfig {

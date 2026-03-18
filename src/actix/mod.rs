@@ -82,14 +82,24 @@ pub fn init(
         let web_ui_available = web_ui_folder(&settings);
         let service_config = web::Data::new(settings.service.clone());
 
-        let mut api_key_whitelist = vec![
-            WhitelistItem::exact("/"),
-            WhitelistItem::exact("/healthz"),
-            WhitelistItem::prefix("/readyz"),
-            WhitelistItem::prefix("/livez"),
-        ];
+        let base_prefix = settings.service.base_path.clone().unwrap_or_else(|| "/".into());
+        let web_ui_base_path = format!("{}{}", base_prefix.trim_end_matches('/'), WEB_UI_PATH);
+
+        let mut api_key_whitelist = vec![];
+        if base_prefix == "/" {
+            api_key_whitelist.push(WhitelistItem::exact("/"));
+            api_key_whitelist.push(WhitelistItem::exact("/healthz"));
+            api_key_whitelist.push(WhitelistItem::prefix("/readyz"));
+            api_key_whitelist.push(WhitelistItem::prefix("/livez"));
+        } else {
+            api_key_whitelist.push(WhitelistItem::exact(format!("{base_prefix}/")));
+            api_key_whitelist.push(WhitelistItem::exact(format!("{base_prefix}/healthz")));
+            api_key_whitelist.push(WhitelistItem::prefix(format!("{base_prefix}/readyz")));
+            api_key_whitelist.push(WhitelistItem::prefix(format!("{base_prefix}/livez")));
+        }
         if web_ui_available.is_some() {
             api_key_whitelist.push(WhitelistItem::prefix(WEB_UI_PATH));
+            api_key_whitelist.push(WhitelistItem::prefix(web_ui_base_path.clone()));
         }
 
         let mut server = HttpServer::new(move || {
@@ -104,6 +114,45 @@ pub fn init(
             let validate_json_config = actix_web_validator::JsonConfig::default()
                 .limit(settings.service.max_request_size_mb * 1024 * 1024)
                 .error_handler(|err, rec| validation_error_handler("JSON body", err, rec));
+
+            let api_scope = web::scope(&base_prefix)
+                .service(index)
+                .configure(config_collections_api)
+                .configure(config_snapshots_api)
+                .configure(config_update_api)
+                .configure(config_cluster_api)
+                .configure(config_service_api)
+                .configure(config_search_api)
+                .configure(config_recommend_api)
+                .configure(config_facet_api)
+                .configure(config_debugger_api)
+                .configure(config_profiler_api)
+                .configure(config_local_shard_api)
+                // Ordering of services is important for correct path pattern matching
+                // See: <https://github.com/qdrant/qdrant/issues/3543>
+                .service(scroll_points)
+                .service(count_points)
+                .service(get_point)
+                .service(get_points);
+
+            let root_compat_api_scope = web::scope("")
+                .configure(config_collections_api)
+                .configure(config_snapshots_api)
+                .configure(config_update_api)
+                .configure(config_cluster_api)
+                .configure(config_service_api)
+                .configure(config_search_api)
+                .configure(config_recommend_api)
+                .configure(config_facet_api)
+                .configure(config_debugger_api)
+                .configure(config_profiler_api)
+                .configure(config_local_shard_api)
+                // Ordering of services is important for correct path pattern matching
+                // See: <https://github.com/qdrant/qdrant/issues/3543>
+                .service(scroll_points)
+                .service(count_points)
+                .service(get_point)
+                .service(get_points);
 
             let mut app = App::new()
                 .wrap(Compress::default()) // Reads the `Accept-Encoding` header to negotiate which compression codec to use.
@@ -139,32 +188,22 @@ pub fn init(
                 .app_data(validate_json_config)
                 .app_data(TempFileConfig::default().directory(&upload_dir))
                 .app_data(MultipartFormConfig::default().total_limit(usize::MAX))
-                .app_data(service_config.clone())
-                .service(index)
-                .configure(config_collections_api)
-                .configure(config_snapshots_api)
-                .configure(config_update_api)
-                .configure(config_cluster_api)
-                .configure(config_service_api)
-                .configure(config_search_api)
-                .configure(config_recommend_api)
-                .configure(config_discovery_api)
-                .configure(config_query_api)
-                .configure(config_facet_api)
-                .configure(config_shards_api)
-                .configure(config_issues_api)
-                .configure(config_debugger_api)
-                .configure(config_profiler_api)
-                .configure(config_local_shard_api)
-                // Ordering of services is important for correct path pattern matching
-                // See: <https://github.com/qdrant/qdrant/issues/3543>
-                .service(scroll_points)
-                .service(count_points)
-                .service(get_point)
-                .service(get_points);
+                .app_data(service_config.clone());
 
             if let Some(static_folder) = web_ui_available.as_deref() {
+                // Keep legacy root dashboard route for Web UI assets that are built with
+                // absolute /dashboard/* paths.
                 app = app.service(web_ui_factory(static_folder));
+                // Also expose dashboard under the configured base path.
+                app = app.service(web::scope(&base_prefix).service(web_ui_factory(static_folder)));
+            }
+
+            app = app.service(api_scope);
+
+            // Compatibility routes for Web UI bundle that uses absolute API paths (e.g. /collections/*).
+            // Keep them only when a custom base path is configured and Web UI is enabled.
+            if base_prefix != "/" && web_ui_available.is_some() {
+                app = app.service(root_compat_api_scope);
             }
 
             app
