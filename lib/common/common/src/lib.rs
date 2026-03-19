@@ -1,6 +1,7 @@
 pub mod bitpacking;
 pub mod bitpacking_links;
 pub mod bitpacking_ordered;
+pub mod bitvec;
 pub mod budget;
 pub mod bytes;
 pub mod counter;
@@ -15,6 +16,7 @@ pub mod ext;
 pub mod fixed_length_priority_queue;
 pub mod flags;
 pub mod fs;
+pub mod generic_consts;
 pub mod is_alive_lock;
 pub mod iterator_ext;
 pub mod load_concurrency;

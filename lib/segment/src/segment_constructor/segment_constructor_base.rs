@@ -1066,7 +1066,7 @@ pub fn migrate_rocksdb_id_tracker_to_mutable(
         );
 
         // Set external ID to internal ID mapping
-        for (external_id, internal_id) in old_id_tracker.iter_from(None) {
+        for (external_id, internal_id) in old_id_tracker.point_mappings().iter_from(None) {
             new_id_tracker.set_link(external_id, internal_id)?;
         }
 
@@ -1188,9 +1188,9 @@ pub fn migrate_rocksdb_dense_vector_storage_to_mmap(
     vector_storage_path: &Path,
 ) -> OperationResult<VectorStorageEnum> {
     use common::counter::hardware_counter::HardwareCounterCell;
+    use common::generic_consts::Sequential;
     use common::types::PointOffsetType;
 
-    use crate::vector_storage::Sequential;
     use crate::vector_storage::dense::appendable_dense_vector_storage::find_storage_files;
 
     log::info!(
@@ -1279,9 +1279,9 @@ pub fn migrate_rocksdb_multi_dense_vector_storage_to_mmap(
     vector_storage_path: &Path,
 ) -> OperationResult<VectorStorageEnum> {
     use common::counter::hardware_counter::HardwareCounterCell;
+    use common::generic_consts::Sequential;
     use common::types::PointOffsetType;
 
-    use crate::vector_storage::Sequential;
     use crate::vector_storage::multi_dense::appendable_mmap_multi_dense_vector_storage::find_storage_files;
 
     log::info!(
@@ -1419,9 +1419,9 @@ pub fn migrate_rocksdb_sparse_vector_storage_to_mmap(
     vector_storage_path: &Path,
 ) -> OperationResult<VectorStorageEnum> {
     use common::counter::hardware_counter::HardwareCounterCell;
+    use common::generic_consts::Sequential;
     use common::types::PointOffsetType;
 
-    use crate::vector_storage::Sequential;
     use crate::vector_storage::sparse::mmap_sparse_vector_storage::find_storage_files;
 
     log::info!(

@@ -2,9 +2,10 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::path::Path;
 
-use bitvec::prelude::BitVec;
+use common::bitvec::BitVec;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::fs::{atomic_save_json, read_json};
+use common::generic_consts::Random;
 use common::tar_unpack::tar_unpack_file;
 use common::types::PointOffsetType;
 use fs_err as fs;
@@ -24,7 +25,7 @@ use crate::types::{
     SnapshotFormat, VectorName,
 };
 use crate::utils;
-use crate::vector_storage::{Random, VectorStorage};
+use crate::vector_storage::VectorStorage;
 
 impl Segment {
     /// Replace vectors in-place
@@ -582,7 +583,7 @@ impl Segment {
 
         // dangling internal ids
         let mut has_dangling_internal_ids = false;
-        for internal_id in id_tracker.iter_internal() {
+        for internal_id in id_tracker.point_mappings().iter_internal() {
             if id_tracker.external_id(internal_id).is_none() {
                 log::error!("Internal id {internal_id} without external id");
                 has_dangling_internal_ids = true
@@ -591,7 +592,7 @@ impl Segment {
 
         // dangling external ids
         let mut has_dangling_external_ids = false;
-        for external_id in id_tracker.iter_external() {
+        for external_id in id_tracker.point_mappings().iter_external() {
             if id_tracker.internal_id(external_id).is_none() {
                 log::error!("External id {external_id} without internal id");
                 has_dangling_external_ids = true;
@@ -600,7 +601,7 @@ impl Segment {
 
         // checking internal id without version
         let mut has_internal_ids_without_version = false;
-        for internal_id in id_tracker.iter_internal() {
+        for internal_id in id_tracker.point_mappings().iter_internal() {
             if id_tracker.internal_version(internal_id).is_none() {
                 log::error!("Internal id {internal_id} without version");
                 has_internal_ids_without_version = true;
@@ -609,7 +610,7 @@ impl Segment {
 
         // check that non deleted points exist in vector storage
         let mut has_internal_ids_without_vector = false;
-        for internal_id in id_tracker.iter_internal() {
+        for internal_id in id_tracker.point_mappings().iter_internal() {
             for (vector_name, vector_data) in &self.vector_data {
                 let vector_storage = vector_data.vector_storage.borrow();
                 let is_vector_deleted_storage = vector_storage.is_deleted_vector(internal_id);
@@ -666,19 +667,6 @@ impl Segment {
     /// Returns list of IDs without mappings which should be removed from segment
     pub fn fix_id_tracker_inconsistencies(&mut self) -> OperationResult<Vec<PointOffsetType>> {
         self.id_tracker.borrow_mut().fix_inconsistencies()
-    }
-
-    /// Returns the amount of non-deleted deferred points.
-    pub fn deferred_point_count(&self) -> usize {
-        match self.deferred_internal_id() {
-            Some(internal_id) => self
-                .id_tracker
-                .borrow()
-                .total_point_count()
-                .saturating_sub(internal_id as usize)
-                .saturating_sub(self.deferred_deleted_count().unwrap_or_default()),
-            None => 0,
-        }
     }
 
     /// Calculates the amount of deleted deferred points by iterating over all points in the ID tracker. Therefore this operation
