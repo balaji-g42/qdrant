@@ -82,20 +82,26 @@ pub fn init(
         let web_ui_available = web_ui_folder(&settings);
         let service_config = web::Data::new(settings.service.clone());
 
-        let base_prefix = settings
+        let configured_base_path = settings
             .service
             .base_path
             .clone()
             .unwrap_or_else(|| "/".into());
-        let web_ui_base_path = format!("{}{}", base_prefix.trim_end_matches('/'), WEB_UI_PATH);
+        let base_prefix = if configured_base_path == "/" {
+            "".to_string()
+        } else {
+            format!("/{}", configured_base_path.trim_matches('/'))
+        };
+        let web_ui_base_path = format!("{}{}", base_prefix, WEB_UI_PATH);
 
         let mut api_key_whitelist = vec![];
-        if base_prefix == "/" {
+        if base_prefix.is_empty() {
             api_key_whitelist.push(WhitelistItem::exact("/"));
             api_key_whitelist.push(WhitelistItem::exact("/healthz"));
             api_key_whitelist.push(WhitelistItem::prefix("/readyz"));
             api_key_whitelist.push(WhitelistItem::prefix("/livez"));
         } else {
+            api_key_whitelist.push(WhitelistItem::exact(base_prefix.clone()));
             api_key_whitelist.push(WhitelistItem::exact(format!("{base_prefix}/")));
             api_key_whitelist.push(WhitelistItem::exact(format!("{base_prefix}/healthz")));
             api_key_whitelist.push(WhitelistItem::prefix(format!("{base_prefix}/readyz")));
@@ -206,7 +212,7 @@ pub fn init(
 
             // Compatibility routes for Web UI bundle that uses absolute API paths (e.g. /collections/*).
             // Keep them only when a custom base path is configured and Web UI is enabled.
-            if base_prefix != "/" && web_ui_available.is_some() {
+            if !base_prefix.is_empty() && web_ui_available.is_some() {
                 app = app.service(root_compat_api_scope);
             }
 

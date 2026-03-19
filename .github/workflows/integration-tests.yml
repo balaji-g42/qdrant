@@ -13,7 +13,7 @@ env:
 jobs:
   integration-tests:
 
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
 
     steps:
       - name: Install minimal stable

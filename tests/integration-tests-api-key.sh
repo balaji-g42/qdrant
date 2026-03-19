@@ -19,6 +19,7 @@ if [ -n "$QDRANT_BASE_PATH" ] && [ "$QDRANT_BASE_PATH" != "/" ]; then
 else
     QDRANT_BASE_PATH=""
     export QDRANT_BASE_PATH
+    unset QDRANT__SERVICE__BASE_PATH
 fi
 
 ./target/debug/qdrant &
