@@ -127,6 +127,8 @@ pub fn init(
         let custom_metrics_path = with_base_path(&base_path, "/metrics");
         let custom_telemetry_path = with_base_path(&base_path, "/telemetry");
 
+        let static_folder_opt = web_ui_available.clone();
+
         let mut api_key_whitelist = vec![
             WhitelistItem::exact("/"),
             WhitelistItem::exact("/healthz"),
@@ -202,13 +204,13 @@ pub fn init(
                 .app_data(service_config.clone());
 
             app = app.configure(configure_api);
-            if let Some(static_folder) = web_ui_available.as_deref() {
+            if let Some(static_folder) = static_folder_opt.clone() {
                 // Always keep legacy path for Web UI assets/runtime assumptions.
-                app = app.service(web_ui_factory(static_folder, WEB_UI_PATH));
+                app = app.service(web_ui_factory(static_folder.clone(), WEB_UI_PATH.to_string()));
 
                 // Optionally expose UI under custom prefixed entrypoint as an alias.
                 if custom_web_ui_path != WEB_UI_PATH {
-                    app = app.service(web_ui_factory(static_folder, &custom_web_ui_path));
+                    app = app.service(web_ui_factory(static_folder, custom_web_ui_path.clone()));
                 }
             }
 

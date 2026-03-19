@@ -35,7 +35,7 @@ use crate::telemetry::PayloadIndexTelemetry;
 use crate::types::{FieldCondition, Match, MatchPhrase, MatchText, PayloadKeyType};
 
 pub enum FullTextIndex {
-    Mutable(MutableFullTextIndex),
+    Mutable(Box<MutableFullTextIndex>),
     Immutable(ImmutableFullTextIndex),
     Mmap(Box<MmapFullTextIndex>),
 }
@@ -56,7 +56,7 @@ impl FullTextIndex {
         ));
         let index = if is_appendable {
             MutableFullTextIndex::open_rocksdb(db_wrapper, config, create_if_missing)?
-                .map(Self::Mutable)
+                .map(|m| Self::Mutable(Box::new(m)))
         } else {
             ImmutableFullTextIndex::open_rocksdb(db_wrapper, config)?.map(Self::Immutable)
         };
@@ -89,7 +89,7 @@ impl FullTextIndex {
         create_if_missing: bool,
     ) -> OperationResult<Option<Self>> {
         let index = MutableFullTextIndex::open_gridstore(dir, config, create_if_missing)?;
-        Ok(index.map(Self::Mutable))
+        Ok(index.map(|m| Self::Mutable(Box::new(m))))
     }
 
     pub fn init(&mut self) -> OperationResult<()> {
@@ -508,7 +508,7 @@ impl FieldIndexBuilderTrait for FullTextIndexRocksDbBuilder {
 
     fn finalize(self) -> OperationResult<Self::FieldIndexType> {
         if self.keep_appendable {
-            return Ok(FullTextIndex::Mutable(self.mutable_index));
+            return Ok(FullTextIndex::Mutable(Box::new(self.mutable_index)));
         }
 
         Ok(FullTextIndex::Immutable(

@@ -29,18 +29,15 @@ pub fn web_ui_folder(settings: &Settings) -> Option<String> {
             .unwrap_or_else(|| DEFAULT_STATIC_DIR.to_string());
         let static_folder_path = Path::new(&static_folder);
         if !static_folder_path.exists() || !static_folder_path.is_dir() {
-            // enabled BUT folder does not exist
             log::warn!(
                 "Static content folder for Web UI '{}' does not exist",
                 static_folder_path.display(),
             );
             None
         } else {
-            // enabled AND folder exists
             Some(static_folder)
         }
     } else {
-        // not enabled
         None
     }
 }
@@ -113,8 +110,8 @@ fn inject_base_path_runtime(html: &str, base_path: &str) -> String {
 fn index_html_path(static_folder: &str) -> PathBuf {
     Path::new(static_folder).join("index.html")
 }
-
-fn index_html_response(static_folder: String, base_path: String) -> HttpResponse {
+#[allow(clippy::unused_async)]
+async fn index_html_response(static_folder: String, base_path: String) -> HttpResponse {
     let index_path = index_html_path(&static_folder);
     let Ok(raw_html) = fs_err::read_to_string(index_path) else {
         return HttpResponse::NotFound().finish();
@@ -126,22 +123,25 @@ fn index_html_response(static_folder: String, base_path: String) -> HttpResponse
         .body(final_html)
 }
 
-pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpServiceFactory {
-    let static_folder = static_folder.to_string();
+pub fn web_ui_factory(static_folder: String, mount_path: String) -> impl HttpServiceFactory {
     let base_path = mount_path
+        .as_str()
         .strip_suffix(WEB_UI_PATH)
         .filter(|prefix| !prefix.is_empty())
         .unwrap_or("/")
         .to_string();
 
-    web::scope(mount_path)
+    #[allow(unused_variables)]
+    web::scope(mount_path.as_str())
         .wrap(DefaultHeaders::new().add(("X-Frame-Options", HeaderValue::from_static("DENY"))))
         .route(
             "",
             web::get().to({
                 let static_folder = static_folder.clone();
                 let base_path = base_path.clone();
-                move |_: HttpRequest| index_html_response(static_folder.clone(), base_path.clone())
+                move |req: HttpRequest| {
+                    index_html_response(static_folder.clone(), base_path.clone())
+                }
             }),
         )
         .route(
@@ -149,7 +149,9 @@ pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpService
             web::get().to({
                 let static_folder = static_folder.clone();
                 let base_path = base_path.clone();
-                move |_: HttpRequest| index_html_response(static_folder.clone(), base_path.clone())
+                move |req: HttpRequest| {
+                    index_html_response(static_folder.clone(), base_path.clone())
+                }
             }),
         )
         .route(
@@ -157,7 +159,9 @@ pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpService
             web::get().to({
                 let static_folder = static_folder.clone();
                 let base_path = base_path.clone();
-                move |_: HttpRequest| index_html_response(static_folder.clone(), base_path.clone())
+                move |req: HttpRequest| {
+                    index_html_response(static_folder.clone(), base_path.clone())
+                }
             }),
         )
         .service(actix_files::Files::new("/", static_folder))
@@ -176,7 +180,7 @@ mod tests {
         let content_type = header::HeaderValue::from_static("text/html; charset=utf-8");
         assert_eq!(headers.get(header::CONTENT_TYPE), Some(&content_type));
         let x_frame_options = header::HeaderValue::from_static("DENY");
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS), Some(&x_frame_options),);
+        assert_eq!(headers.get(header::X_FRAME_OPTIONS), Some(&x_frame_options));
     }
 
     #[actix_web::test]
@@ -193,29 +197,29 @@ mod tests {
 
         let static_folder = maybe_static_folder.unwrap();
         let mount_path = web_ui_mount_path("/");
-        let srv =
-            test::init_service(App::new().service(web_ui_factory(&static_folder, &mount_path)))
-                .await;
+        let srv = test::init_service(
+            App::new().service(web_ui_factory(static_folder.clone(), mount_path.clone())),
+        )
+        .await;
 
-        // Index path (no trailing slash)
         let req = TestRequest::with_uri(&mount_path).to_request();
         let res = test::call_service(&srv, req).await;
         assert_eq!(res.status(), StatusCode::OK);
         let headers = res.headers();
         assert_html_custom_headers(headers);
-        // Index path (trailing slash)
+
         let req = TestRequest::with_uri(format!("{mount_path}/").as_str()).to_request();
         let res = test::call_service(&srv, req).await;
         assert_eq!(res.status(), StatusCode::OK);
         let headers = res.headers();
         assert_html_custom_headers(headers);
-        // Index path (index.html file)
+
         let req = TestRequest::with_uri(format!("{mount_path}/index.html").as_str()).to_request();
         let res = test::call_service(&srv, req).await;
         assert_eq!(res.status(), StatusCode::OK);
         let headers = res.headers();
         assert_html_custom_headers(headers);
-        // Static asset (favicon.ico)
+
         let req = TestRequest::with_uri(format!("{mount_path}/favicon.ico").as_str()).to_request();
         let res = test::call_service(&srv, req).await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -224,10 +228,12 @@ mod tests {
             headers.get(header::CONTENT_TYPE),
             Some(&header::HeaderValue::from_static("image/x-icon")),
         );
-        // Non-existing path (404 Not Found)
+
         let fake_path = uuid::Uuid::new_v4().to_string();
-        let srv =
-            test::init_service(App::new().service(web_ui_factory(&fake_path, &mount_path))).await;
+        let srv = test::init_service(
+            App::new().service(web_ui_factory(fake_path.clone(), mount_path.clone())),
+        )
+        .await;
 
         let req = TestRequest::with_uri(&mount_path).to_request();
         let res = test::call_service(&srv, req).await;
@@ -251,9 +257,10 @@ mod tests {
 
         let static_folder = maybe_static_folder.unwrap();
         let mount_path = web_ui_mount_path("/qdrant");
-        let srv =
-            test::init_service(App::new().service(web_ui_factory(&static_folder, &mount_path)))
-                .await;
+        let srv = test::init_service(
+            App::new().service(web_ui_factory(static_folder.clone(), mount_path.clone())),
+        )
+        .await;
 
         let req = TestRequest::with_uri(&mount_path).to_request();
         let res = test::call_service(&srv, req).await;
@@ -265,6 +272,7 @@ mod tests {
     }
 
     #[actix_web::test]
+    #[allow(clippy::unused_async)]
     async fn test_web_ui_dual_mount_static_assets() {
         let static_dir = String::from("static");
         let mut settings = Settings::new(None).unwrap();
