@@ -290,8 +290,8 @@ mod tests {
 
         let srv = test::init_service(
             App::new()
-                .service(web_ui_factory(&static_folder, &legacy_mount))
-                .service(web_ui_factory(&static_folder, &custom_mount)),
+                .service(web_ui_factory(static_folder.clone(), legacy_mount.clone()))
+                .service(web_ui_factory(static_folder.clone(), custom_mount.clone())),
         )
         .await;
 

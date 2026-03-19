@@ -1,4 +1,4 @@
-#[cfg(not(target_os = "windows"))]
+#[allow(unused_imports)]
 mod prof;
 
 use std::sync::Arc;
