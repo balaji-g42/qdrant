@@ -41,16 +41,16 @@ jobs:
         docker buildx create --use
 
         # Authenticate on registries
-        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username generall --password-stdin
-        echo "${{ secrets.GITHUB_TOKEN }}" | docker login https://docker.pkg.github.com -u qdrant --password-stdin
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username balajig4292 --password-stdin
+        echo "${{ secrets.GITHUB_TOKEN }}" | docker login https://docker.pkg.github.com -u balaji-g42 --password-stdin
 
         # Build regular image for Docker Hub
-        DOCKERHUB_TAG="qdrant/qdrant:${{ github.ref_name }}"
-        DOCKERHUB_TAG_LATEST="qdrant/qdrant:latest"
-        DOCKERHUB_TAG_MINOR="qdrant/qdrant:${MINOR_VERSION}"
-        DOCKERHUB_TAG_MAJOR="qdrant/qdrant:${MAJOR_VERSION}"
+        DOCKERHUB_TAG="balajig4292/qdrant:${{ github.ref_name }}"
+        DOCKERHUB_TAG_LATEST="balajig4292/qdrant:latest"
+        DOCKERHUB_TAG_MINOR="balajig4292/qdrant:${MINOR_VERSION}"
+        DOCKERHUB_TAG_MAJOR="balajig4292/qdrant:${MAJOR_VERSION}"
         TAGS="-t ${DOCKERHUB_TAG} -t ${DOCKERHUB_TAG_LATEST} -t ${DOCKERHUB_TAG_MINOR} -t ${DOCKERHUB_TAG_MAJOR}"
-        GITHUB_TAG="docker.pkg.github.com/qdrant/qdrant/qdrant:${{ github.ref_name }}"
+        GITHUB_TAG="docker.pkg.github.com/balaji-g42/qdrant/qdrant:${{ github.ref_name }}"
 
         # Pull, retag and push to GitHub packages
         docker buildx build --sbom=true --platform='linux/amd64,linux/arm64' --build-arg GIT_COMMIT_ID=${{ github.sha }} --build-arg=FEATURES=rocksdb $TAGS --push --label "org.opencontainers.image.version"=$RELEASE_VERSION .
@@ -62,12 +62,12 @@ jobs:
         cosign sign --new-bundle-format=false --use-signing-config=false --yes "${DOCKERHUB_TAG}@${DIGEST}"
 
         # Build unprivileged image for Docker Hub
-        DOCKERHUB_TAG_UNPRIVILEGED="qdrant/qdrant:${{ github.ref_name }}-unprivileged"
-        DOCKERHUB_TAG_LATEST_UNPRIVILEGED="qdrant/qdrant:latest-unprivileged"
-        DOCKERHUB_TAG_MINOR_UNPRIVILEGED="qdrant/qdrant:${MINOR_VERSION}-unprivileged"
-        DOCKERHUB_TAG_MAJOR_UNPRIVILEGED="qdrant/qdrant:${MAJOR_VERSION}-unprivileged"
+        DOCKERHUB_TAG_UNPRIVILEGED="balajig4292/qdrant:${{ github.ref_name }}-unprivileged"
+        DOCKERHUB_TAG_LATEST_UNPRIVILEGED="balajig4292/qdrant:latest-unprivileged"
+        DOCKERHUB_TAG_MINOR_UNPRIVILEGED="balajig4292/qdrant:${MINOR_VERSION}-unprivileged"
+        DOCKERHUB_TAG_MAJOR_UNPRIVILEGED="balajig4292/qdrant:${MAJOR_VERSION}-unprivileged"
         TAGS_UNPRIVILEGED="-t ${DOCKERHUB_TAG_UNPRIVILEGED} -t ${DOCKERHUB_TAG_LATEST_UNPRIVILEGED} -t ${DOCKERHUB_TAG_MINOR_UNPRIVILEGED} -t ${DOCKERHUB_TAG_MAJOR_UNPRIVILEGED}"
-        GITHUB_TAG_UNPRIVILEGED="docker.pkg.github.com/qdrant/qdrant/qdrant:${{ github.ref_name }}-unprivileged"
+        GITHUB_TAG_UNPRIVILEGED="docker.pkg.github.com/balaji-g42/qdrant/qdrant:${{ github.ref_name }}-unprivileged"
 
         # Pull, retag and push to GitHub packages
         docker buildx build --sbom=true --build-arg='USER_ID=1000' --platform='linux/amd64,linux/arm64' --build-arg=FEATURES=rocksdb $TAGS_UNPRIVILEGED --push --label "org.opencontainers.image.version"=$RELEASE_VERSION .
@@ -110,16 +110,16 @@ jobs:
         docker buildx create --use
 
         # Authenticate on registries
-        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username generall --password-stdin
-        echo "${{ secrets.GITHUB_TOKEN }}" | docker login https://docker.pkg.github.com -u qdrant --password-stdin
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username balajig4292 --password-stdin
+        echo "${{ secrets.GITHUB_TOKEN }}" | docker login https://docker.pkg.github.com -u balaji-g42 --password-stdin
 
         # Build GPU NVIDIA image for Docker Hub
-        DOCKERHUB_TAG="qdrant/qdrant:${{ github.ref_name }}-gpu-nvidia"
-        DOCKERHUB_TAG_LATEST="qdrant/qdrant:gpu-nvidia-latest"
-        DOCKERHUB_TAG_MINOR="qdrant/qdrant:${MINOR_VERSION}-gpu-nvidia"
-        DOCKERHUB_TAG_MAJOR="qdrant/qdrant:${MAJOR_VERSION}-gpu-nvidia"
+        DOCKERHUB_TAG="balajig4292/qdrant:${{ github.ref_name }}-gpu-nvidia"
+        DOCKERHUB_TAG_LATEST="balajig4292/qdrant:gpu-nvidia-latest"
+        DOCKERHUB_TAG_MINOR="balajig4292/qdrant:${MINOR_VERSION}-gpu-nvidia"
+        DOCKERHUB_TAG_MAJOR="balajig4292/qdrant:${MAJOR_VERSION}-gpu-nvidia"
         TAGS="-t ${DOCKERHUB_TAG} -t ${DOCKERHUB_TAG_LATEST} -t ${DOCKERHUB_TAG_MINOR} -t ${DOCKERHUB_TAG_MAJOR}"
-        GITHUB_TAG="docker.pkg.github.com/qdrant/qdrant/qdrant:${{ github.ref_name }}-gpu-nvidia"
+        GITHUB_TAG="docker.pkg.github.com/balaji-g42/qdrant/qdrant:${{ github.ref_name }}-gpu-nvidia"
 
         # Pull, retag and push to GitHub packages
         docker buildx build --sbom=true --build-arg GPU=nvidia --platform='linux/amd64' --build-arg GIT_COMMIT_ID=${{ github.sha }} --build-arg=FEATURES=rocksdb $TAGS --push --label "org.opencontainers.image.version"=$RELEASE_VERSION .
@@ -131,12 +131,12 @@ jobs:
         cosign sign --new-bundle-format=false --use-signing-config=false --yes "${DOCKERHUB_TAG}@${DIGEST}"
 
         # Build GPU AMD image for Docker Hub
-        DOCKERHUB_TAG="qdrant/qdrant:${{ github.ref_name }}-gpu-amd"
-        DOCKERHUB_TAG_LATEST="qdrant/qdrant:gpu-amd-latest"
-        DOCKERHUB_TAG_MINOR="qdrant/qdrant:${MINOR_VERSION}-gpu-amd"
-        DOCKERHUB_TAG_MAJOR="qdrant/qdrant:${MAJOR_VERSION}-gpu-amd"
+        DOCKERHUB_TAG="balajig4292/qdrant:${{ github.ref_name }}-gpu-amd"
+        DOCKERHUB_TAG_LATEST="balajig4292/qdrant:gpu-amd-latest"
+        DOCKERHUB_TAG_MINOR="balajig4292/qdrant:${MINOR_VERSION}-gpu-amd"
+        DOCKERHUB_TAG_MAJOR="balajig4292/qdrant:${MAJOR_VERSION}-gpu-amd"
         TAGS="-t ${DOCKERHUB_TAG} -t ${DOCKERHUB_TAG_LATEST} -t ${DOCKERHUB_TAG_MINOR} -t ${DOCKERHUB_TAG_MAJOR}"
-        GITHUB_TAG="docker.pkg.github.com/qdrant/qdrant/qdrant:${{ github.ref_name }}-gpu-amd"
+        GITHUB_TAG="docker.pkg.github.com/balaji-g42/qdrant/qdrant:${{ github.ref_name }}-gpu-amd"
 
         # Pull, retag and push to GitHub packages
         docker buildx build --sbom=true --build-arg GPU=amd --platform='linux/amd64' --build-arg GIT_COMMIT_ID=${{ github.sha }} --build-arg=FEATURES=rocksdb $TAGS --push --label "org.opencontainers.image.version"=$RELEASE_VERSION .
