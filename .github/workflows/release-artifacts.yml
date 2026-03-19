@@ -158,7 +158,7 @@ jobs:
               -i qdrant.svg \
               --custom-apprun pkg/appimage/AppRun.sh
 
-          wget -O dist-qdrant.zip "$(curl --silent "https://api.github.com/repos/qdrant/qdrant-web-ui/releases/latest" | jq -r '.assets[] | select(.name=="dist-qdrant.zip") | .browser_download_url')"          
+          wget -O dist-qdrant.zip "$(curl --silent "https://api.github.com/repos/balaji-g42/qdrant-web-ui/releases/latest" | jq -r '.assets[] | select(.name=="dist-qdrant.zip") | .browser_download_url')"          
           unzip -o dist-qdrant.zip -d static
           mv -n static/dist/* static/
           rm -rf static/dist
