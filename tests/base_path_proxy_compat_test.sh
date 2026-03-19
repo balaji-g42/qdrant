@@ -3,9 +3,6 @@
 
 set -ex
 
-# Ensure current path is project root
-cd "$(dirname "$0")/../"
-
 QDRANT_HOST=${QDRANT_HOST:-"127.0.0.1:63330"}
 TMP_DIR=${TMP_DIR:-"./target/base-path-proxy-test-artifacts"}
 mkdir -p "$TMP_DIR"

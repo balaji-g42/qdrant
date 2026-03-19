@@ -1,3 +1,4 @@
+#[allow(clippy::large_enum_variant)]
 use std::borrow::Cow;
 use std::path::PathBuf;
 #[cfg(feature = "rocksdb")]

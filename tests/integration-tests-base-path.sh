@@ -88,4 +88,4 @@ fi
 
 echo "server ready to serve traffic"
 
-./tests/base_path_proxy_compat_test.sh
+bash ./tests/base_path_proxy_compat_test.sh
