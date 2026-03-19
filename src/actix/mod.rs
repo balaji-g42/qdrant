@@ -82,7 +82,11 @@ pub fn init(
         let web_ui_available = web_ui_folder(&settings);
         let service_config = web::Data::new(settings.service.clone());
 
-        let base_prefix = settings.service.base_path.clone().unwrap_or_else(|| "/".into());
+        let base_prefix = settings
+            .service
+            .base_path
+            .clone()
+            .unwrap_or_else(|| "/".into());
         let web_ui_base_path = format!("{}{}", base_prefix.trim_end_matches('/'), WEB_UI_PATH);
 
         let mut api_key_whitelist = vec![];
