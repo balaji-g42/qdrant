@@ -5,9 +5,8 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 
-use std::cmp::{max, min};
-use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
@@ -20,6 +19,8 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::process_counter::ProcessCounter;
 use common::save_on_disk::SaveOnDisk;
 use common::toposort::TopoSort;
+use common::types::PointOffsetType;
+use itertools::Itertools;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use rand::seq::IndexedRandom;
 use segment::common::operation_error::{OperationError, OperationResult};
@@ -28,31 +29,15 @@ use segment::entry::entry_point::{NonAppendableSegmentEntry, SegmentEntry};
 use segment::segment::Segment;
 use segment::segment_constructor::build_segment;
 use segment::types::{ExtendedPointId, Payload, PointIdType, SegmentConfig, SeqNumberType};
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 
 use crate::locked_segment::LockedSegment;
 use crate::payload_index_schema::PayloadIndexSchema;
 
 pub type SegmentId = usize;
 
-/// Internal structure for deduplication of points. Used for BinaryHeap
-#[derive(Eq, PartialEq)]
-struct DedupPoint {
-    point_id: PointIdType,
-    segment_id: SegmentId,
-}
-
-impl Ord for DedupPoint {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.point_id.cmp(&other.point_id).reverse()
-    }
-}
-
-impl PartialOrd for DedupPoint {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+/// All occurrences of a point across segments: (segment_id, version, is_deferred).
+type PointOccurrences = SmallVec<[(SegmentId, SeqNumberType, bool); 2]>;
 
 #[derive(Debug, Default)]
 pub struct SegmentHolder {
@@ -372,6 +357,8 @@ impl SegmentHolder {
     /// This finds all point versions and groups them per segment. The newest point versions are
     /// selected to be updated, all older versions are marked to be deleted.
     ///
+    /// Deferred points are never deleted here — the optimizer handles their lifecycle.
+    ///
     /// Points that are already soft deleted are not included.
     fn find_points_to_update_and_delete(
         &self,
@@ -380,11 +367,21 @@ impl SegmentHolder {
         AHashMap<SegmentId, Vec<PointIdType>>,
         AHashMap<SegmentId, Vec<PointIdType>>,
     ) {
-        let mut to_delete: AHashMap<SegmentId, Vec<PointIdType>> = AHashMap::new();
+        // Two-pass approach for order-independent correctness.
+        //
+        // Rules:
+        // - Always update the latest version regardless of deferred status
+        // - Never delete deferred points — optimizer handles them
+        // - Delete older non-deferred copies only if the latest version has a non-deferred copy too
+        // - Keep older non-deferred copies when the latest is deferred
 
-        // Find in which segments latest point versions are located, mark older points for deletion
-        let mut latest_points: AHashMap<PointIdType, (SeqNumberType, SmallVec<[SegmentId; 1]>)> =
+        let segment_count = self.len().max(1);
+        let default_capacity = ids.len() / segment_count;
+
+        // Pass 1: collect all occurrences of each point across segments
+        let mut all_occurrences: AHashMap<PointIdType, PointOccurrences> =
             AHashMap::with_capacity(ids.len());
+
         for (segment_id, segment) in self.iter() {
             let segment_arc = segment.get();
             let segment_lock = segment_arc.read();
@@ -393,51 +390,48 @@ impl SegmentHolder {
                 let Some(point_version) = segment_lock.point_version(segment_point) else {
                     continue;
                 };
-
-                match latest_points.entry(segment_point) {
-                    // First time we see the point, add it
-                    Entry::Vacant(entry) => {
-                        entry.insert((point_version, smallvec![segment_id]));
-                    }
-                    // Point we have seen before is older, replace it and mark older for deletion
-                    Entry::Occupied(mut entry) if entry.get().0 < point_version => {
-                        let (old_version, old_segment_ids) =
-                            entry.insert((point_version, smallvec![segment_id]));
-
-                        // Mark other point for deletion if the version is older
-                        // TODO(timvisee): remove this check once deleting old points uses correct version
-                        if old_version < point_version {
-                            for old_segment_id in old_segment_ids {
-                                to_delete
-                                    .entry(old_segment_id)
-                                    .or_default()
-                                    .push(segment_point);
-                            }
-                        }
-                    }
-                    // Ignore points with the same version, only update one of them
-                    // TODO(timvisee): remove this branch once deleting old points uses correct version
-                    Entry::Occupied(mut entry) if entry.get().0 == point_version => {
-                        entry.get_mut().1.push(segment_id);
-                    }
-                    // Point we have seen before is newer, mark this point for deletion
-                    Entry::Occupied(_) => {
-                        to_delete.entry(segment_id).or_default().push(segment_point);
-                    }
-                }
+                let is_deferred = segment_lock.point_is_deferred(segment_point);
+                all_occurrences.entry(segment_point).or_default().push((
+                    segment_id,
+                    point_version,
+                    is_deferred,
+                ));
             }
         }
 
-        // Group points to update by segments
-        let segment_count = self.len();
-        let mut to_update = AHashMap::with_capacity(min(segment_count, latest_points.len()));
-        let default_capacity = ids.len() / max(segment_count / 2, 1);
-        for (point_id, (_point_version, segment_ids)) in latest_points {
-            for segment_id in segment_ids {
-                to_update
-                    .entry(segment_id)
-                    .or_insert_with(|| Vec::with_capacity(default_capacity))
-                    .push(point_id);
+        // Pass 2: for each point, determine what to update and what to delete
+        let mut to_update: AHashMap<SegmentId, Vec<PointIdType>> =
+            AHashMap::with_capacity(segment_count);
+        let mut to_delete: AHashMap<SegmentId, Vec<PointIdType>> = AHashMap::new();
+
+        for (point_id, occurrences) in all_occurrences {
+            let latest_version = occurrences
+                .iter()
+                .map(|(_, version, _)| *version)
+                .max()
+                .unwrap();
+
+            let latest_has_non_deferred = occurrences
+                .iter()
+                .any(|(_, version, is_deferred)| *version == latest_version && !*is_deferred);
+
+            for (segment_id, version, is_deferred) in occurrences {
+                if version == latest_version {
+                    // Latest version: always update
+                    to_update
+                        .entry(segment_id)
+                        .or_insert_with(|| Vec::with_capacity(default_capacity))
+                        .push(point_id);
+                } else if !is_deferred && latest_has_non_deferred {
+                    // Older non-deferred copy: safe to delete only if the latest
+                    // version also has a non-deferred copy
+                    to_delete
+                        .entry(segment_id)
+                        .or_insert_with(|| Vec::with_capacity(default_capacity))
+                        .push(point_id);
+                }
+                // Otherwise: deferred copies are never deleted (optimizer handles them),
+                // and older non-deferred copies are kept when the latest is deferred-only
             }
         }
 
@@ -524,6 +518,7 @@ impl SegmentHolder {
     pub fn apply_points<F>(
         &self,
         ids: &[PointIdType],
+        hw_counter: &HardwareCounterCell,
         mut point_operation: F,
     ) -> OperationResult<usize>
     where
@@ -536,21 +531,7 @@ impl SegmentHolder {
         let (to_update, to_delete) = self.find_points_to_update_and_delete(ids);
 
         // Delete old points first, because we want to handle copy-on-write in multiple proxy segments properly
-        for (segment_id, points) in to_delete {
-            let segment = self.get(segment_id).unwrap();
-            let segment_arc = segment.get();
-            let mut write_segment = segment_arc.write();
-
-            for point_id in points {
-                if let Some(version) = write_segment.point_version(point_id) {
-                    write_segment.delete_point(
-                        version,
-                        point_id,
-                        &HardwareCounterCell::disposable(), // Internal operation: no need to measure.
-                    )?;
-                }
-            }
-        }
+        self.delete_points_from_segments(to_delete, hw_counter)?;
 
         // Apply point operations to selected segments
         let mut applied_points = 0;
@@ -566,6 +547,37 @@ impl SegmentHolder {
         }
 
         Ok(applied_points)
+    }
+
+    pub fn delete_points_from_segments(
+        &self,
+        to_delete: AHashMap<SegmentId, Vec<PointIdType>>,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<()> {
+        for (segment_id, points) in to_delete {
+            let segment = self.get(segment_id).unwrap();
+            let segment_arc = segment.get();
+            let mut write_segment = segment_arc.write();
+
+            for point_id in points {
+                if let Some(version) = write_segment.point_version(point_id) {
+                    write_segment.delete_point(version, point_id, hw_counter)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// This operation deduplicates subset of points across all segments.
+    /// It scans all segments for presence of the points, detects points with the highest version,
+    /// and removes all other versions of the points from all segments.
+    pub fn deduplicate_points(
+        &self,
+        points: &[PointIdType],
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<()> {
+        let (_to_keep, to_delete) = self.find_points_to_update_and_delete(points);
+        self.delete_points_from_segments(to_delete, hw_counter)
     }
 
     /// Try to acquire read lock over the given segment with increasing wait time.
@@ -661,7 +673,7 @@ impl SegmentHolder {
 
         let mut applied_points: AHashSet<PointIdType> = Default::default();
 
-        let _applied_points_count = self.apply_points(ids, |point_id, idx, write_segment| {
+        let _ = self.apply_points(ids, hw_counter, |point_id, idx, write_segment| {
             if let Some(point_version) = write_segment.point_version(point_id)
                 && point_version >= op_num
             {
@@ -699,7 +711,10 @@ impl SegmentHolder {
                         appendable_write_segment
                             .set_full_payload(op_num, point_id, &payload, hw_counter)?;
 
-                        write_segment.delete_point(op_num, point_id, hw_counter)?;
+                        // Keep the source of the CoW operation as the deferred point is invisible until indexing.
+                        if !appendable_write_segment.point_is_deferred(point_id) {
+                            write_segment.delete_point(op_num, point_id, hw_counter)?;
+                        }
 
                         Ok(true)
                     },
@@ -756,11 +771,13 @@ impl SegmentHolder {
         segments_path: &Path,
         segment_config: SegmentConfig,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
+        deferred_internal_id: Option<PointOffsetType>,
     ) -> OperationResult<LockedSegment> {
         let segment = self.build_tmp_segment(
             segments_path,
             Some(segment_config),
             payload_index_schema,
+            deferred_internal_id,
             true,
         )?;
         self.add_new_locked(segment.clone());
@@ -789,6 +806,7 @@ impl SegmentHolder {
         segments_path: &Path,
         segment_config: Option<SegmentConfig>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
+        deferred_internal_id: Option<PointOffsetType>,
         save_version: bool,
     ) -> OperationResult<LockedSegment> {
         let config = match segment_config {
@@ -809,7 +827,8 @@ impl SegmentHolder {
                 .clone(),
         };
 
-        let mut segment = build_segment(segments_path, &config, save_version)?;
+        let mut segment =
+            build_segment(segments_path, &config, deferred_internal_id, save_version)?;
 
         // Internal operation.
         let hw_counter = HardwareCounterCell::disposable();
@@ -904,7 +923,14 @@ impl SegmentHolder {
             .collect::<Vec<_>>()
     }
 
-    fn find_duplicated_points(&self) -> AHashMap<SegmentId, Vec<PointIdType>> {
+    pub fn find_duplicated_points(&self) -> AHashMap<SegmentId, Vec<PointIdType>> {
+        struct DedupPoint {
+            segment_id: SegmentId,
+            point_id: PointIdType,
+            version: Option<SeqNumberType>,
+            is_deferred: bool,
+        }
+
         let segments = self
             .iter()
             .map(|(segment_id, locked_segment)| (segment_id, locked_segment.get()))
@@ -913,77 +939,78 @@ impl SegmentHolder {
             .iter()
             .map(|(segment_id, locked_segment)| (*segment_id, locked_segment.read()))
             .collect::<BTreeMap<_, _>>();
-        let mut iterators = locked_segments
+
+        // Iterator produces groups of points by point ID
+        let point_group_iter = locked_segments
             .iter()
-            .map(|(segment_id, locked_segment)| (*segment_id, locked_segment.iter_points()))
-            .collect::<BTreeMap<_, _>>();
-
-        // heap contains the current iterable point id from each segment
-        let mut heap = iterators
-            .iter_mut()
-            .filter_map(|(&segment_id, iter)| {
-                iter.next().map(|point_id| DedupPoint {
-                    point_id,
-                    segment_id,
-                })
+            .map(|(&segment_id, locked_segment)| {
+                locked_segment
+                    .iter_points()
+                    .map(move |point_id| DedupPoint {
+                        segment_id,
+                        point_id,
+                        version: None,
+                        is_deferred: false,
+                    })
             })
-            .collect::<BinaryHeap<_>>();
+            .kmerge_by(|a, b| a.point_id < b.point_id)
+            .chunk_by(|entry| entry.point_id);
 
-        let mut last_point_id_opt = None;
-        let mut last_segment_id_opt = None;
-        let mut last_point_version_opt = None;
-        let mut points_to_remove: AHashMap<SegmentId, Vec<PointIdType>> = Default::default();
+        let mut points = Vec::new();
+        let mut points_to_remove: AHashMap<SegmentId, Vec<PointIdType>> = AHashMap::new();
 
-        while let Some(entry) = heap.pop() {
-            let point_id = entry.point_id;
-            let segment_id = entry.segment_id;
-            if let Some(next_point_id) = iterators.get_mut(&segment_id).and_then(|i| i.next()) {
-                heap.push(DedupPoint {
-                    segment_id,
-                    point_id: next_point_id,
-                });
+        for (point_id, group_iter) in &point_group_iter {
+            // Fill buffer with points of current chunk, need at least 2 points to deduplicate
+            points.clear();
+            points.extend(group_iter);
+            if points.len() < 2 {
+                continue;
             }
 
-            if last_point_id_opt == Some(point_id) {
-                let last_segment_id = last_segment_id_opt.unwrap();
+            // Enrich with point version and deferred status
+            for dedup_point in &mut points {
+                let segment = &locked_segments[&dedup_point.segment_id];
+                dedup_point.version = segment.point_version(point_id);
+                dedup_point.is_deferred = segment.point_is_deferred(point_id);
+            }
 
-                let point_version = locked_segments[&segment_id].point_version(point_id);
-                let last_point_version = if let Some(last_point_version) = last_point_version_opt {
-                    last_point_version
+            // Sort points from highest to lowest version
+            // If versions are equal, sort by segment ID to make the order deterministic.
+            points.sort_unstable_by_key(|p| (Reverse(p.version), p.segment_id));
+
+            let latest_version = points[0].version;
+
+            // Check if the latest version has a non-deferred copy
+            let latest_has_non_deferred = points
+                .iter()
+                .any(|p| p.version == latest_version && !p.is_deferred);
+
+            // Decide which copies to remove:
+            // - Deferred: keep the first, remove duplicates
+            // - Non-deferred with latest version: keep the first (the winner)
+            // - Older non-deferred: remove only if the latest has a non-deferred copy
+            //   (otherwise keep visible until the deferred point is indexed)
+            let mut kept_deferred = false;
+            let mut kept_non_deferred = false;
+
+            for dedup_point in &points {
+                let should_remove = if dedup_point.is_deferred {
+                    let duplicate = kept_deferred;
+                    kept_deferred = true;
+                    duplicate
+                } else if dedup_point.version == latest_version && !kept_non_deferred {
+                    kept_non_deferred = true;
+                    false
                 } else {
-                    let version = locked_segments[&last_segment_id].point_version(point_id);
-                    last_point_version_opt = Some(version);
-                    version
+                    latest_has_non_deferred
                 };
 
-                // choose newer version between point_id and last_point_id
-                if point_version < last_point_version {
-                    log::trace!(
-                        "Selected point {point_id} in segment {segment_id} for deduplication (version {point_version:?} versus {last_point_version:?} in segment {last_segment_id})",
-                    );
-
+                if should_remove {
                     points_to_remove
-                        .entry(segment_id)
+                        .entry(dedup_point.segment_id)
                         .or_default()
-                        .push(point_id);
-                } else {
-                    log::trace!(
-                        "Selected point {point_id} in segment {last_segment_id} for deduplication (version {last_point_version:?} versus {point_version:?} in segment {segment_id})",
-                    );
-
-                    points_to_remove
-                        .entry(last_segment_id)
-                        .or_default()
-                        .push(point_id);
-
-                    last_point_id_opt = Some(point_id);
-                    last_segment_id_opt = Some(segment_id);
-                    last_point_version_opt = Some(point_version);
+                        .push(dedup_point.point_id);
                 }
-            } else {
-                last_point_id_opt = Some(point_id);
-                last_segment_id_opt = Some(segment_id);
-                last_point_version_opt = None;
             }
         }
 

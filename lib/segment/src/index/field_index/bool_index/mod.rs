@@ -50,11 +50,14 @@ impl BoolIndex {
         }
     }
 
-    pub fn iter_counts_per_value(&self) -> Box<dyn Iterator<Item = (bool, usize)> + '_> {
+    pub fn iter_counts_per_value(
+        &self,
+        deferred_internal_id: Option<PointOffsetType>,
+    ) -> Box<dyn Iterator<Item = (bool, usize)> + '_> {
         match self {
             #[cfg(feature = "rocksdb")]
             BoolIndex::Simple(index) => Box::new(index.iter_counts_per_value()),
-            BoolIndex::Mmap(index) => Box::new(index.iter_counts_per_value()),
+            BoolIndex::Mmap(index) => Box::new(index.iter_counts_per_value(deferred_internal_id)),
         }
     }
 
@@ -221,7 +224,7 @@ impl PayloadFieldIndex for BoolIndex {
         &self,
         threshold: usize,
         key: crate::types::PayloadKeyType,
-    ) -> Box<dyn Iterator<Item = super::PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<super::PayloadBlockCondition>> + '_> {
         match self {
             #[cfg(feature = "rocksdb")]
             BoolIndex::Simple(index) => index.payload_blocks(threshold, key),
@@ -252,11 +255,15 @@ impl FacetIndex for BoolIndex {
             .map(|(value, iter)| (FacetValueRef::Bool(value), iter))
     }
 
-    fn iter_counts_per_value(&self) -> impl Iterator<Item = FacetHit<FacetValueRef<'_>>> + '_ {
-        self.iter_counts_per_value().map(|(value, count)| FacetHit {
-            value: FacetValueRef::Bool(value),
-            count,
-        })
+    fn iter_counts_per_value(
+        &self,
+        deferred_internal_id: Option<PointOffsetType>,
+    ) -> impl Iterator<Item = FacetHit<FacetValueRef<'_>>> + '_ {
+        self.iter_counts_per_value(deferred_internal_id)
+            .map(|(value, count)| FacetHit {
+                value: FacetValueRef::Bool(value),
+                count,
+            })
     }
 }
 
@@ -543,6 +550,7 @@ mod tests {
 
         let blocks = index
             .payload_blocks(0, JsonPath::new(FIELD_NAME))
+            .map(Result::unwrap)
             .collect_vec();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].cardinality, 6);

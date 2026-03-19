@@ -9,11 +9,13 @@ pub mod web_ui;
 
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ::api::rest::models::{ApiResponse, ApiStatus, VersionInfo};
 use actix_cors::Cors;
 use actix_multipart::form::MultipartFormConfig;
 use actix_multipart::form::tempfile::TempFileConfig;
+use actix_web::http::KeepAlive;
 use actix_web::middleware::{Compress, Condition, Logger, NormalizePath};
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, error, get, web};
 use actix_web_extras::middleware::Condition as ConditionEx;
@@ -27,7 +29,7 @@ use crate::actix::api::cluster_api::config_cluster_api;
 use crate::actix::api::collections_api::config_collections_api;
 use crate::actix::api::count_api::count_points;
 use crate::actix::api::debug_api::config_debugger_api;
-use crate::actix::api::discovery_api::config_discovery_api;
+use crate::actix::api::discover_api::config_discover_api;
 use crate::actix::api::issues_api::config_issues_api;
 use crate::actix::api::local_shard_api::config_local_shard_api;
 use crate::actix::api::profiler_api::config_profiler_api;

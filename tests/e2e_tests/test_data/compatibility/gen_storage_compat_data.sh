@@ -3,17 +3,6 @@
 set -ex
 
 export QDRANT_HOST="localhost:6333"
-QDRANT_BASE_PATH="${QDRANT_BASE_PATH:-}"
-DOCKER_BASE_PATH_ENV=()
-if [ -n "$QDRANT_BASE_PATH" ] && [ "$QDRANT_BASE_PATH" != "/" ]; then
-  QDRANT_BASE_PATH="/${QDRANT_BASE_PATH#/}"
-  QDRANT_BASE_PATH="${QDRANT_BASE_PATH%/}"
-  export QDRANT__SERVICE__BASE_PATH="$QDRANT_BASE_PATH"
-  DOCKER_BASE_PATH_ENV=(-e QDRANT__SERVICE__BASE_PATH="$QDRANT_BASE_PATH")
-else
-  QDRANT_BASE_PATH=""
-fi
-BASE_URL="http://$QDRANT_HOST$QDRANT_BASE_PATH"
 
 SCRIPT_DIR=$(realpath "$(dirname "$0")")
 
@@ -39,7 +28,7 @@ if [ $USE_DOCKER -eq 0 ]; then
   ./target/debug/qdrant & PID=$!
 else
   docker run --rm -it -v $(pwd)/storage:/qdrant/storage debian:12-slim bash -c "rm -rf /qdrant/storage/*"
-  docker run -d --rm --network=host -v $(pwd)/storage:/qdrant/storage --name=gen-storage-compatibility "${DOCKER_BASE_PATH_ENV[@]}" qdrant/qdrant:$QDRANT_VERSION
+  docker run -d --rm --network=host -v $(pwd)/storage:/qdrant/storage --name=gen-storage-compatibility  qdrant/qdrant:$QDRANT_VERSION
 fi
 
 function teardown()
@@ -57,7 +46,7 @@ function teardown()
 trap teardown EXIT
 
 declare retry=0
-until curl --output /dev/null --silent --get --fail $BASE_URL/collections; do
+until curl --output /dev/null --silent --get --fail http://$QDRANT_HOST/collections; do
   if ((retry++ < 30)); then
       printf 'waiting for server to start...'
       sleep 1
@@ -75,13 +64,13 @@ sleep 1
 
 # Create snapshot
 SNAPSHOT_NAME=$(
-    curl -X POST "$BASE_URL/snapshots" \
+    curl -X POST "http://$QDRANT_HOST/snapshots" \
     -H 'Content-Type: application/json' \
     --fail -s | jq .result.name -r
 )
 
 # Download snapshot
-curl -X GET "$BASE_URL/snapshots/$SNAPSHOT_NAME" \
+curl -X GET "http://$QDRANT_HOST/snapshots/$SNAPSHOT_NAME" \
     --fail -s --output "${SCRIPT_DIR}/full-snapshot.snapshot"
 
 teardown

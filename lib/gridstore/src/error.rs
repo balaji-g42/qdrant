@@ -1,4 +1,7 @@
 use common::mmap;
+use common::universal_io::UniversalIoError;
+
+use crate::tracker::PageId;
 
 #[derive(thiserror::Error, Debug)]
 pub enum GridstoreError {
@@ -7,6 +10,8 @@ pub enum GridstoreError {
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
+    UniversalIo(#[from] UniversalIoError),
+    #[error("{0}")]
     SerdeJson(#[from] serde_json::error::Error),
     #[error("Service error: {description}")]
     ServiceError { description: String },
@@ -14,6 +19,8 @@ pub enum GridstoreError {
     FlushCancelled,
     #[error("Validation error: {message}")]
     ValidationError { message: String },
+    #[error("Page {page_id} not found")]
+    PageNotFound { page_id: PageId },
 }
 
 impl GridstoreError {

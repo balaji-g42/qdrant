@@ -64,6 +64,49 @@ pub fn adjust_to_available_vectors(
     }
 }
 
+/// Re-estimate cardinality based on deferred points. Assuming that deferred points are not correlated with the filter
+pub fn adjust_for_deferred_points(
+    estimation: CardinalityEstimation,
+    visible_points: usize,
+    total_points: usize,
+) -> CardinalityEstimation {
+    if visible_points == 0 || total_points == 0 {
+        return CardinalityEstimation {
+            primary_clauses: estimation.primary_clauses,
+            min: 0,
+            exp: 0,
+            max: 0,
+        };
+    }
+
+    let number_of_deferred_points = total_points.saturating_sub(visible_points);
+
+    // It is possible, all deferred points are selected in worst case
+    let min = estimation.min.saturating_sub(number_of_deferred_points);
+    // Another extreme case - all deferred points are not selected
+    let max = estimation.max.min(visible_points).min(total_points);
+
+    let availability_prob = (visible_points as f64 / total_points as f64).min(1.0);
+
+    let exp = (estimation.exp as f64 * availability_prob).round() as usize;
+
+    debug_assert!(
+        min <= exp,
+        "estimation: {estimation:?}, visible_points: {visible_points}, total_points: {total_points}, min: {min}, exp: {exp}"
+    );
+    debug_assert!(
+        exp <= max,
+        "estimation: {estimation:?}, visible_points: {visible_points}, total_points: {total_points}, exp: {exp}, max: {max}"
+    );
+
+    CardinalityEstimation {
+        primary_clauses: estimation.primary_clauses,
+        min,
+        exp,
+        max,
+    }
+}
+
 /// Combine cardinality of multiple estimations in an OR fashion by using the complement rule.
 /// Assumes that the estimations are independent.
 ///
@@ -109,11 +152,21 @@ pub fn combine_should_estimations(
     }
 }
 
+/// Estimate cardinality for `min_should` (at least `min_count` conditions).
+///
+/// Returns zero immediately when `min_count` exceeds the number of
+/// estimations, which matches filter semantics and avoids generating
+/// impossible combinations.
 pub fn combine_min_should_estimations(
     estimations: &[CardinalityEstimation],
     min_count: usize,
     total: usize,
 ) -> CardinalityEstimation {
+    // Prevent pathological allocation paths in combinations(min_count)
+    if min_count > estimations.len() {
+        return CardinalityEstimation::exact(0);
+    }
+
     /*
     | First estimate cardinality of intersections and then combine the estimations
     | ex) min_count : 2, # of estimations : 4
@@ -469,6 +522,18 @@ mod tests {
         assert!(estimation.max <= TOTAL);
         assert!(estimation.exp <= estimation.max);
         assert!(estimation.min <= estimation.exp);
+    }
+
+    #[test]
+    fn combine_min_should_min_count_above_len_returns_exact_zero() {
+        let total = 1_000usize;
+        let estimations = vec![
+            CardinalityEstimation::exact(10),
+            CardinalityEstimation::exact(20),
+        ];
+
+        let estimation = combine_min_should_estimations(&estimations, estimations.len() + 1, total);
+        assert_eq!(estimation, CardinalityEstimation::exact(0));
     }
 
     #[test]

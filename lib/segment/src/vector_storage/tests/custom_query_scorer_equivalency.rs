@@ -4,20 +4,18 @@ use std::sync::atomic::AtomicBool;
 use std::{error, result};
 
 use common::counter::hardware_counter::HardwareCounterCell;
-#[cfg(target_os = "linux")]
-use common::mmap::AdviceSetting;
 use common::types::PointOffsetType;
 use itertools::Itertools;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rstest::rstest;
 
 use super::utils::sampler;
 use crate::data_types::vectors::{QueryVector, VectorElementType};
-use crate::fixtures::payload_context_fixture::FixtureIdTracker;
+use crate::fixtures::payload_context_fixture::create_id_tracker_fixture;
 use crate::fixtures::query_fixtures::QueryVariant;
-use crate::id_tracker::id_tracker_base::IdTracker;
+use crate::id_tracker::IdTracker;
 use crate::index::hnsw_index::point_scorer::FilteredScorer;
 use crate::types::{
     BinaryQuantizationConfig, Distance, ProductQuantizationConfig, QuantizationConfig,
@@ -63,15 +61,7 @@ fn ram_storage(_dir: &Path) -> VectorStorageEnum {
 
 #[cfg(target_os = "linux")]
 fn async_memmap_storage(dir: &std::path::Path) -> VectorStorageEnum {
-    open_memmap_vector_storage_with_async_io(
-        dir,
-        DIMS,
-        DISTANCE,
-        true,
-        AdviceSetting::Global,
-        false,
-    )
-    .unwrap()
+    open_memmap_vector_storage_with_async_io(dir, DIMS, DISTANCE, true, false).unwrap()
 }
 
 fn scalar_u8() -> WithQuantization {
@@ -138,10 +128,10 @@ fn scoring_equivalency(
         DIMS,
         &mut raw_storage,
         NUM_POINTS,
-        &mut gen_sampler(&mut rng.clone()),
+        &mut gen_sampler(&mut rng),
     )?;
 
-    let mut id_tracker = FixtureIdTracker::new(NUM_POINTS);
+    let mut id_tracker = create_id_tracker_fixture(NUM_POINTS);
     super::utils::delete_random_vectors(
         &mut rng,
         &mut raw_storage,
@@ -194,8 +184,7 @@ fn scoring_equivalency(
             HardwareCounterCell::new(),
         )?;
 
-        let points =
-            (0..other_storage.total_vector_count() as _).choose_multiple(&mut rng, SAMPLE_SIZE);
+        let points = (0..other_storage.total_vector_count() as _).sample(&mut rng, SAMPLE_SIZE);
 
         let scores = scorer.score_points(&mut points.clone(), 0).collect_vec();
         let other_scores = other_scorer
@@ -251,7 +240,7 @@ fn compare_scoring_equivalency(
     #[values(
         QueryVariant::RecoBestScore,
         QueryVariant::RecoSumScores,
-        QueryVariant::Discovery,
+        QueryVariant::Discover,
         QueryVariant::Context
     )]
     query_variant: QueryVariant,
@@ -268,7 +257,7 @@ fn async_compare_scoring_equivalency(
     #[values(
         QueryVariant::RecoBestScore,
         QueryVariant::RecoSumScores,
-        QueryVariant::Discovery,
+        QueryVariant::Discover,
         QueryVariant::Context
     )]
     query_variant: QueryVariant,

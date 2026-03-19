@@ -39,9 +39,6 @@ jobs:
           - target: aarch64
             manylinux: manylinux_2_17
 
-    env:
-      PROTOC_VERSION: '33.1'
-
     steps:
       - name: Checkout Qdrant
         uses: actions/checkout@v6
@@ -54,24 +51,9 @@ jobs:
           working-directory: lib/edge/python
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          before-script-linux: |
-            if command -v unzip; then
-                :
-            elif command -v apt-get; then
-                apt-get update -y && apt-get install -y unzip
-            elif command -v yum; then
-                yum install -y unzip
-            elif command -v dnf; then
-                dnf install -y unzip
-            elif command -v apk; then
-                apk add --no-cache unzip
-            fi
-
-            curl -f -L https://github.com/protocolbuffers/protobuf/releases/download/v${{ env.PROTOC_VERSION }}/protoc-${{ env.PROTOC_VERSION }}-linux-x86_64.zip -o protoc.zip
-            unzip protoc.zip -d /usr
 
       - name: Upload Python wheel
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: qdrant-edge-${{ matrix.manylinux }}-${{ matrix.arch || matrix.target }}-${{ matrix.python }}
           path: lib/edge/python/dist
@@ -94,11 +76,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install Python
         id: setup-python
         uses: actions/setup-python@v6
@@ -117,7 +94,7 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: Upload Python wheel
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: qdrant-edge-macos-${{ matrix.target }}-${{ matrix.python.label || matrix.python }}
           path: lib/edge/python/dist
@@ -140,11 +117,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install Python
         id: setup-python
         uses: actions/setup-python@v6
@@ -163,10 +135,64 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: Upload Python wheel
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: qdrant-edge-windows-${{ matrix.target }}-${{ matrix.python.label || matrix.python }}
           path: lib/edge/python/dist
+
+
+  edge-py-test:
+    name: Test Python wheels [${{ matrix.os }}, ${{ matrix.python }}]
+
+    runs-on: ${{ matrix.os }}
+    needs:
+      - edge-py-linux
+      - edge-py-macos
+      - edge-py-windows
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-24.04-arm
+          - ubuntu-latest
+          - windows-latest
+        python:
+          - '3.10'
+          - 'pypy3.11'
+
+    steps:
+      - name: Checkout Qdrant
+        uses: actions/checkout@v6
+
+      - uses: extractions/setup-just@v3
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: qdrant-edge-*
+          merge-multiple: true
+          path: lib/edge/python/dist
+
+      - name: Setup Qdrant
+        uses: ./.github/actions/setup-qdrant
+
+      - name: Install and test wheel
+        working-directory: lib/edge/python
+        run: |
+          uv venv --allow-existing --python ${{ matrix.python }}
+          uv pip install --no-index --find-links dist/ qdrant-edge-py
+          uv pip install requests
+          just py-examples
 
 
   merge-artifacts:
@@ -177,12 +203,13 @@ jobs:
       - edge-py-linux
       - edge-py-macos
       - edge-py-windows
+      - edge-py-test
 
     if: inputs.publish
 
     steps:
       - name: Merge release artifacts
-        uses: actions/upload-artifact/merge@v6
+        uses: actions/upload-artifact/merge@v7
         with:
           name: qdrant-edge
           pattern: qdrant-edge-*
@@ -203,7 +230,7 @@ jobs:
         uses: actions/setup-python@v6
 
       - name: Download release wheels
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: qdrant-edge
 

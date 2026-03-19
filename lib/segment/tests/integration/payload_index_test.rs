@@ -6,14 +6,14 @@ use std::sync::atomic::AtomicBool;
 use anyhow::{Context, Result};
 use atomic_refcell::AtomicRefCell;
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::PointOffsetType;
+use common::types::{DeferredBehavior, PointOffsetType};
 use fnv::FnvBuildHasher;
 use fs_err as fs;
 use indexmap::IndexSet;
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use segment::data_types::facets::{FacetParams, FacetValue};
 use segment::data_types::index::{
     FloatIndexParams, FloatIndexType, IntegerIndexParams, IntegerIndexType, KeywordIndexParams,
@@ -21,12 +21,13 @@ use segment::data_types::index::{
 };
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, only_default_vector};
 use segment::entry::entry_point::{NonAppendableSegmentEntry, SegmentEntry};
-use segment::fixtures::payload_context_fixture::FixtureIdTracker;
+use segment::fixtures::payload_context_fixture::create_id_tracker_fixture;
 use segment::fixtures::payload_fixtures::{
     FLICKING_KEY, FLT_KEY, GEO_KEY, INT_KEY, INT_KEY_2, INT_KEY_3, LAT_RANGE, LON_RANGE, STR_KEY,
     STR_PROJ_KEY, STR_ROOT_PROJ_KEY, TEXT_KEY, generate_diverse_nested_payload,
     generate_diverse_payload, random_filter, random_nested_filter, random_vector,
 };
+use segment::id_tracker::IdTracker;
 use segment::index::PayloadIndex;
 use segment::index::field_index::{FieldIndex, PrimaryCondition};
 use segment::index::struct_payload_index::StructPayloadIndex;
@@ -85,9 +86,9 @@ impl TestSegments {
         let config = Self::make_simple_config(true);
 
         let mut plain_segment =
-            build_segment(&base_dir.path().join("plain"), &config, true).unwrap();
+            build_segment(&base_dir.path().join("plain"), &config, None, true).unwrap();
         let mut struct_segment =
-            build_segment(&base_dir.path().join("struct"), &config, true).unwrap();
+            build_segment(&base_dir.path().join("struct"), &config, None, true).unwrap();
 
         let num_points = 3000;
         let points_to_delete = 500;
@@ -629,7 +630,7 @@ fn test_is_empty_conditions(test_segments: &TestSegments) -> Result<()> {
         .plain_segment
         .payload_index
         .borrow()
-        .query_points(&filter, &hw_counter, &is_stopped);
+        .query_points(&filter, &hw_counter, &is_stopped, None);
 
     let real_number = plain_result.len();
 
@@ -638,7 +639,7 @@ fn test_is_empty_conditions(test_segments: &TestSegments) -> Result<()> {
         .struct_segment
         .payload_index
         .borrow()
-        .query_points(&filter, &hw_counter, &is_stopped)
+        .query_points(&filter, &hw_counter, &is_stopped, None)
         .into_iter()
         // null index does not track deleted points, so we need to filter them out here. In callsites,
         // the deleted check is done externally anyway
@@ -1190,7 +1191,7 @@ fn test_update_payload_index_type() {
     }
 
     let wrapped_payload_storage = Arc::new(AtomicRefCell::new(payload_storage.into()));
-    let id_tracker = Arc::new(AtomicRefCell::new(FixtureIdTracker::new(point_num)));
+    let id_tracker = Arc::new(AtomicRefCell::new(create_id_tracker_fixture(point_num)));
 
     let mut index = StructPayloadIndex::open(
         wrapped_payload_storage,
@@ -1328,7 +1329,9 @@ fn validate_facet_result(
                 count_filter.as_ref(),
                 &Default::default(),
                 &hw_counter,
+                DeferredBehavior::Exclude,
             )
+            .unwrap()
             .len();
 
         ensure!(*count == exact, "Facet value: {value:?}");

@@ -25,7 +25,7 @@ use crate::common::operation_time_statistics::ScopeDurationMeasurer;
 use crate::data_types::named_vectors::CowVector;
 use crate::data_types::query_context::VectorQueryContext;
 use crate::data_types::vectors::{QueryVector, VectorInternal, VectorRef};
-use crate::id_tracker::IdTrackerSS;
+use crate::id_tracker::{IdTracker, IdTrackerEnum};
 use crate::index::field_index::CardinalityEstimation;
 use crate::index::hnsw_index::point_scorer::BatchFilteredSearcher;
 use crate::index::query_estimator::adjust_to_available_vectors;
@@ -44,7 +44,7 @@ pub const USE_COMPRESSED: bool = true;
 #[derive(Debug)]
 pub struct SparseVectorIndex<TInvertedIndex: InvertedIndex> {
     config: SparseIndexConfig,
-    id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
     payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
     path: PathBuf,
@@ -61,7 +61,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
         self.config
     }
 
-    pub fn id_tracker(&self) -> &Arc<AtomicRefCell<IdTrackerSS>> {
+    pub fn id_tracker(&self) -> &Arc<AtomicRefCell<IdTrackerEnum>> {
         &self.id_tracker
     }
 
@@ -80,7 +80,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
 
 pub struct SparseVectorIndexOpenArgs<'a, F: FnMut()> {
     pub config: SparseIndexConfig,
-    pub id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    pub id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     pub vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
     pub payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
     pub path: &'a Path,
@@ -193,7 +193,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
     }
 
     fn build_inverted_index(
-        id_tracker: &AtomicRefCell<IdTrackerSS>,
+        id_tracker: &AtomicRefCell<IdTrackerEnum>,
         vector_storage: &AtomicRefCell<VectorStorageEnum>,
         path: &Path,
         stopped: &AtomicBool,
@@ -313,17 +313,24 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
             Some(filter) => {
                 let payload_index = self.payload_index.borrow();
                 let mut filtered_points = match prefiltered_points {
+                    // `prefiltered_points` always contains visible points only so we don't need additional filtering here.
                     Some(filtered_points) => filtered_points.iter().copied(),
                     None => {
-                        let filtered_points =
-                            payload_index.query_points(filter, &hw_counter, &is_stopped);
+                        let filtered_points = payload_index.query_points(
+                            filter,
+                            &hw_counter,
+                            &is_stopped,
+                            vector_query_context.deferred_internal_id(),
+                        );
                         *prefiltered_points = Some(filtered_points);
                         prefiltered_points.as_ref().unwrap().iter().copied()
                     }
                 };
                 searcher.peek_top_iter(&mut filtered_points, &is_stopped)?
             }
-            None => searcher.peek_top_all(&is_stopped)?,
+            None => {
+                searcher.peek_top_all(&is_stopped, vector_query_context.deferred_internal_id())?
+            }
         };
         let res = results.pop().expect("single element results");
         Ok(res)
@@ -351,9 +358,17 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
         let hw_counter = vector_query_context.hardware_counter();
 
         let ids = match prefiltered_points {
+            // Deferred points get filtered in the `None` case and are added to `prefiltered_points`.
+            // In the `Some` case, we iterate over this set of points,
+            // so no additional filtering is required in that case.
             Some(filtered_points) => filtered_points.iter(),
             None => {
-                let filtered_points = payload_index.query_points(filter, &hw_counter, &is_stopped);
+                let filtered_points = payload_index.query_points(
+                    filter,
+                    &hw_counter,
+                    &is_stopped,
+                    vector_query_context.deferred_internal_id(),
+                );
                 *prefiltered_points = Some(filtered_points);
                 prefiltered_points.as_ref().unwrap().iter()
             }
@@ -379,6 +394,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
             memory_handle,
             &is_stopped,
             &hw_counter,
+            vector_query_context.deferred_internal_id(),
         );
         let search_result = search_context.plain_search(&ids);
         Ok(search_result)
@@ -422,6 +438,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
             memory_handle,
             &is_stopped,
             &hw_counter,
+            vector_query_context.deferred_internal_id(),
         );
 
         match filter {
@@ -503,7 +520,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
             ),
             QueryVector::RecommendBestScore(_)
             | QueryVector::RecommendSumScores(_)
-            | QueryVector::Discovery(_)
+            | QueryVector::Discover(_)
             | QueryVector::Context(_)
             | QueryVector::FeedbackNaive(_) => {
                 let _timer = if filter.is_some() {

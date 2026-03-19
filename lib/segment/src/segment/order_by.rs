@@ -3,11 +3,13 @@ use std::sync::atomic::AtomicBool;
 
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::iterator_ext::IteratorExt;
+use common::types::{DeferredBehavior, PointOffsetType};
 use itertools::Either;
 
 use super::Segment;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::data_types::order_by::{Direction, OrderBy, OrderValue};
+use crate::id_tracker::IdTracker;
 use crate::index::PayloadIndex;
 use crate::index::field_index::numeric_index::StreamRange;
 use crate::spaces::tools::{peek_top_largest_iterable, peek_top_smallest_iterable};
@@ -21,6 +23,7 @@ impl Segment {
         condition: &Filter,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>> {
         let payload_index = self.payload_index.borrow();
         let id_tracker = self.id_tracker.borrow();
@@ -37,13 +40,16 @@ impl Segment {
 
         let start_from = order_by.start_from();
 
+        let effective_deferred_id = deferred_behavior.apply(self.deferred_internal_id);
+
         let values_ids_iterator = payload_index
             .iter_filtered_points(
                 condition,
-                &*id_tracker,
+                &id_tracker,
                 &cardinality_estimation,
                 hw_counter,
                 is_stopped,
+                effective_deferred_id,
             )
             .flat_map(|internal_id| {
                 // Repeat a point for as many values as it has
@@ -91,6 +97,7 @@ impl Segment {
         filter: Option<&Filter>,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>> {
         let payload_index = self.payload_index.borrow();
 
@@ -102,7 +109,13 @@ impl Segment {
                 key: order_by.key.to_string(),
             })?;
 
-        let range_iter = numeric_index.stream_range(&order_by.as_range());
+        let range_iter = numeric_index
+            .stream_range(&order_by.as_range())
+            // We can't early stop the iterator for deferred points because the items are sorted lexicographically by type `(T, internalID)`.
+            .filter(|&(_, internal_id)| {
+                deferred_behavior.include_all_points()
+                    || internal_id < self.deferred_internal_id.unwrap_or(PointOffsetType::MAX)
+            });
 
         let directed_range_iter = match order_by.direction() {
             Direction::Asc => Either::Left(range_iter),

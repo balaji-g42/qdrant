@@ -30,9 +30,9 @@ use segment::data_types::vectors::{
 };
 use segment::entry::{NonAppendableSegmentEntry as _, SegmentEntry as _};
 use segment::fixtures::index_fixtures::random_vector;
-use segment::id_tracker::IdTrackerSS;
+use segment::id_tracker::{IdTracker, IdTrackerEnum};
+use segment::index::hnsw_index::get_num_indexing_threads;
 use segment::index::hnsw_index::hnsw::{HNSWIndex, HnswIndexOpenArgs};
-use segment::index::hnsw_index::num_rayon_threads;
 use segment::index::{VectorIndex as _, VectorIndexEnum};
 use segment::segment::Segment;
 use segment::segment_constructor::VectorIndexBuildArgs;
@@ -394,7 +394,7 @@ fn build_hnsw_index<R: Rng + ?Sized>(
         return HNSWIndex::open(open_args).unwrap();
     }
 
-    let permit_cpu_count = num_rayon_threads(open_args.hnsw_config.max_indexing_threads);
+    let permit_cpu_count = get_num_indexing_threads(open_args.hnsw_config.max_indexing_threads);
     let permit = Arc::new(ResourcePermit::dummy(permit_cpu_count as u32));
 
     HNSWIndex::build(
@@ -436,7 +436,7 @@ fn measure_accuracy(
                     .vector_index
                     .borrow()
                     .search(&[query], None, top, None, &Default::default())
-                    .pipe(|results| process_search_results(&*id_tracker, results))
+                    .pipe(|results| process_search_results(&id_tracker, results))
             })
             .collect::<Vec<_>>();
         log::debug!("Exact search time = {:?}", start.elapsed());
@@ -458,7 +458,7 @@ fn measure_accuracy(
                     }),
                     &Default::default(),
                 )
-                .pipe(|results| process_search_results(&*id_tracker, results));
+                .pipe(|results| process_search_results(&id_tracker, results));
 
             // Get number of same results.
             index_result
@@ -472,7 +472,7 @@ fn measure_accuracy(
 }
 
 fn process_search_results(
-    id_tracker: &IdTrackerSS,
+    id_tracker: &IdTrackerEnum,
     results: OperationResult<Vec<Vec<ScoredPointOffset>>>,
 ) -> Vec<ExtendedPointId> {
     // Expect exactly one result

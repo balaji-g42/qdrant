@@ -5,6 +5,7 @@ use common::iterator_ext::IteratorExt;
 use rand::seq::{IteratorRandom, SliceRandom};
 
 use super::Segment;
+use crate::id_tracker::IdTracker;
 use crate::index::PayloadIndex;
 use crate::types::{Filter, PointIdType};
 
@@ -23,15 +24,16 @@ impl Segment {
         let ids_iterator = payload_index
             .iter_filtered_points(
                 condition,
-                &*id_tracker,
+                &id_tracker,
                 &cardinality_estimation,
                 hw_counter,
                 is_stopped,
+                self.deferred_internal_id,
             )
             .filter_map(|internal_id| id_tracker.external_id(internal_id));
 
         let mut rng = rand::rng();
-        let mut shuffled = ids_iterator.choose_multiple(&mut rng, limit);
+        let mut shuffled = ids_iterator.sample(&mut rng, limit);
         shuffled.shuffle(&mut rng);
 
         shuffled
@@ -48,7 +50,7 @@ impl Segment {
         let filter_context = payload_index.filter_context(condition, hw_counter);
         self.id_tracker
             .borrow()
-            .iter_random()
+            .iter_random_visible(self.deferred_internal_id)
             .stop_if(is_stopped)
             .filter(move |(_, internal_id)| filter_context.check(*internal_id))
             .map(|(external_id, _)| external_id)
@@ -59,7 +61,7 @@ impl Segment {
     pub(super) fn read_by_random_id(&self, limit: usize) -> Vec<PointIdType> {
         self.id_tracker
             .borrow()
-            .iter_random()
+            .iter_random_visible(self.deferred_internal_id)
             .map(|x| x.0)
             .take(limit)
             .collect()

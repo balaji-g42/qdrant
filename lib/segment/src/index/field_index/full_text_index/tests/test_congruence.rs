@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rstest::rstest;
 use serde_json::Value;
 use tempfile::{Builder, TempDir};
@@ -461,9 +461,11 @@ fn test_congruence(
                 assert_eq!(
                     index_a
                         .payload_blocks(threshold, JsonPath::new(FIELD_NAME))
+                        .map(Result::unwrap)
                         .count(),
                     index_b
                         .payload_blocks(threshold, JsonPath::new(FIELD_NAME))
+                        .map(Result::unwrap)
                         .count(),
                 );
             }

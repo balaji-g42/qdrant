@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 
 use ahash::AHashMap;
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::TelemetryDetail;
+use common::types::{DeferredBehavior, TelemetryDetail};
 use uuid::Uuid;
 
 use crate::common::Flusher;
@@ -92,6 +92,7 @@ pub trait NonAppendableSegmentEntry: SnapshotEntry {
         with_vector: &WithVector,
         hw_counter: &HardwareCounterCell,
         is_stopped: &AtomicBool,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<AHashMap<ExtendedPointId, SegmentRecord>>;
 
     /// Retrieve payload for the point
@@ -115,7 +116,8 @@ pub trait NonAppendableSegmentEntry: SnapshotEntry {
         filter: Option<&Filter>,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
-    ) -> Vec<PointIdType>;
+        deferred_behavior: DeferredBehavior,
+    ) -> OperationResult<Vec<PointIdType>>;
 
     /// Return points which satisfies filtering condition ordered by the `order_by.key` field,
     /// starting with `order_by.start_from` value including.
@@ -129,6 +131,7 @@ pub trait NonAppendableSegmentEntry: SnapshotEntry {
         order_by: &'a OrderBy,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>>;
 
     /// Return random points which satisfies filtering condition.
@@ -140,7 +143,7 @@ pub trait NonAppendableSegmentEntry: SnapshotEntry {
         filter: Option<&Filter>,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
-    ) -> Vec<PointIdType>;
+    ) -> OperationResult<Vec<PointIdType>>;
 
     /// Read points in [from; to) range
     fn read_range(&self, from: Option<PointIdType>, to: Option<PointIdType>) -> Vec<PointIdType>;
@@ -172,7 +175,7 @@ pub trait NonAppendableSegmentEntry: SnapshotEntry {
         &'a self,
         filter: Option<&'a Filter>,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation;
+    ) -> OperationResult<CardinalityEstimation>;
 
     fn vector_names(&self) -> HashSet<VectorNameBuf>;
 
@@ -337,6 +340,12 @@ pub trait NonAppendableSegmentEntry: SnapshotEntry {
     fn get_telemetry_data(&self, detail: TelemetryDetail) -> SegmentTelemetry;
 
     fn fill_query_context(&self, query_context: &mut QueryContext);
+
+    /// Check whether the point is marked as deferred in the segment
+    fn point_is_deferred(&self, point_id: PointIdType) -> bool;
+
+    /// Returns external IDs of all deferred points in the segment
+    fn deferred_point_ids(&self) -> Vec<PointIdType>;
 }
 
 /// Define mutable operations which can be performed with Segment or Segment-like entity.
@@ -398,4 +407,6 @@ pub trait SegmentEntry: NonAppendableSegmentEntry {
         point_id: PointIdType,
         hw_counter: &HardwareCounterCell,
     ) -> OperationResult<bool>;
+
+    fn deferred_points_count(&self) -> usize;
 }

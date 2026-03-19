@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::types::DeferredBehavior;
 use futures::future;
 use futures::future::try_join_all;
 use itertools::{Itertools, process_results};
@@ -34,11 +35,18 @@ impl LocalShard {
             let is_stopped = stopping_guard.get_is_stopped();
 
             let hw_counter = hw_counter.fork();
+            let cpu_utilization = hw_counter.cpu_utilization();
             let task = search_runtime_handle.spawn_blocking(move || {
-                let get_segment = segment.get();
-                let read_segment = get_segment.read();
+                let work = || {
+                    let get_segment = segment.get();
+                    let read_segment = get_segment.read();
 
-                read_segment.facet(&request, &is_stopped, &hw_counter)
+                    read_segment.facet(&request, &is_stopped, &hw_counter)
+                };
+                match cpu_utilization {
+                    Some(cu) => cu.measure(work),
+                    None => work(),
+                }
             });
             AbortOnDropHandle::new(task)
         };
@@ -127,6 +135,7 @@ impl LocalShard {
                         search_runtime_handle,
                         hw_acc,
                         Some(timeout.saturating_sub(instant.elapsed())),
+                        DeferredBehavior::Exclude,
                     )
                     .await?
                     .len();
@@ -159,16 +168,24 @@ impl LocalShard {
             let is_stopped = stopping_guard.get_is_stopped();
 
             let hw_counter = hw_counter.fork();
+            let cpu_utilization = hw_counter.cpu_utilization();
             let task = handle.spawn_blocking(move || {
-                let get_segment = segment.get();
-                let read_segment = get_segment.read();
+                let work = || {
+                    let get_segment = segment.get();
+                    let read_segment = get_segment.read();
 
-                read_segment.unique_values(
-                    &request.key,
-                    request.filter.as_ref(),
-                    &is_stopped,
-                    &hw_counter,
-                )
+                    read_segment.unique_values(
+                        &request.key,
+                        request.filter.as_ref(),
+                        &is_stopped,
+                        &hw_counter,
+                    )
+                };
+
+                match cpu_utilization {
+                    Some(cu) => cu.measure(work),
+                    None => work(),
+                }
             });
             AbortOnDropHandle::new(task)
         };

@@ -44,7 +44,6 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }
-wal = { workspace = true }
 ordered-float = { workspace = true }
 hashring = "0.3.6"
 tinyvec = { workspace = true }
@@ -73,9 +72,10 @@ common = { path = "../common/common" }
 cancel = { path = "../common/cancel" }
 issues = { path = "../common/issues" }
 segment = { path = "../segment", default-features = false }
-shard = { path = "../shard", default-features = false }
+shard = { path = "../shard", default-features = false, features = ["api"] }
 sparse = { path = "../sparse" }
 api = { path = "../api" }
+wal = { path = "../wal" }
 
 itertools = { workspace = true }
 indicatif = { workspace = true }
@@ -93,7 +93,7 @@ strum = { workspace = true }
 urlencoding = { workspace = true }
 
 tracing = { workspace = true, optional = true }
-fs4 = "0.13.1"
+fs4 = { workspace = true }
 
 # AWS S3 support
 object_store = { version = "0.13.1", features = ["aws"] }

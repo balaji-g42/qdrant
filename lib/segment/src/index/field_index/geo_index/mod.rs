@@ -78,7 +78,7 @@ impl GeoMapIndex {
         let index = if is_on_disk {
             GeoMapIndex::Mmap(Box::new(mmap_index))
         } else {
-            GeoMapIndex::Immutable(ImmutableGeoMapIndex::open_mmap(mmap_index))
+            GeoMapIndex::Immutable(ImmutableGeoMapIndex::open_mmap(mmap_index)?)
         };
 
         Ok(Some(index))
@@ -152,7 +152,7 @@ impl GeoMapIndex {
         }
     }
 
-    fn points_of_hash(&self, hash: &GeoHash, hw_counter: &HardwareCounterCell) -> usize {
+    fn points_of_hash(&self, hash: GeoHash, hw_counter: &HardwareCounterCell) -> usize {
         match self {
             GeoMapIndex::Mutable(index) => index.points_of_hash(hash),
             GeoMapIndex::Immutable(index) => index.points_of_hash(hash),
@@ -160,7 +160,7 @@ impl GeoMapIndex {
         }
     }
 
-    fn values_of_hash(&self, hash: &GeoHash, hw_counter: &HardwareCounterCell) -> usize {
+    fn values_of_hash(&self, hash: GeoHash, hw_counter: &HardwareCounterCell) -> usize {
         match self {
             GeoMapIndex::Mutable(index) => index.values_of_hash(hash),
             GeoMapIndex::Immutable(index) => index.values_of_hash(hash),
@@ -279,12 +279,12 @@ impl GeoMapIndex {
             return CardinalityEstimation::exact(0);
         };
 
-        let total_points = self.points_of_hash(&common_hash, hw_counter);
-        let total_values = self.values_of_hash(&common_hash, hw_counter);
+        let total_points = self.points_of_hash(common_hash, hw_counter);
+        let total_values = self.values_of_hash(common_hash, hw_counter);
 
         let (sum, maximum_per_hash) = values
             .iter()
-            .map(|region| self.points_of_hash(region, hw_counter))
+            .map(|&region| self.points_of_hash(region, hw_counter))
             .fold((0, 0), |(sum, maximum), count| {
                 (sum + count, max(maximum, count))
             });
@@ -356,18 +356,19 @@ impl GeoMapIndex {
     }
 
     /// Get iterator over smallest geo-hash regions larger than `threshold` points
-    fn large_hashes(&self, threshold: usize) -> impl Iterator<Item = (GeoHash, usize)> + '_ {
+    fn large_hashes(
+        &self,
+        threshold: usize,
+    ) -> impl Iterator<Item = OperationResult<(GeoHash, usize)>> + '_ {
         let filter_condition =
             |(hash, size): &(GeoHash, usize)| *size > threshold && !hash.is_empty();
         let mut large_regions = match self {
             GeoMapIndex::Mutable(index) => index
                 .points_per_hash()
-                .map(|(&hash, size)| (hash, size))
                 .filter(filter_condition)
                 .collect_vec(),
             GeoMapIndex::Immutable(index) => index
                 .points_per_hash()
-                .map(|(&hash, size)| (hash, size))
                 .filter(filter_condition)
                 .collect_vec(),
             GeoMapIndex::Mmap(index) => index
@@ -390,7 +391,7 @@ impl GeoMapIndex {
             }
         }
 
-        edge_region.into_iter()
+        edge_region.into_iter().map(Ok)
     }
 
     pub fn values_is_empty(&self, idx: PointOffsetType) -> bool {
@@ -796,10 +797,10 @@ impl PayloadFieldIndex for GeoMapIndex {
         &self,
         threshold: usize,
         key: PayloadKeyType,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         Box::new(
             self.large_hashes(threshold)
-                .map(move |(geo_hash, size)| PayloadBlockCondition {
+                .map_ok(move |(geo_hash, size)| PayloadBlockCondition {
                     condition: FieldCondition::new_geo_bounding_box(
                         key.clone(),
                         geo_hash_to_box(geo_hash),
@@ -892,7 +893,8 @@ mod tests {
                     };
 
                     // Load index from mmap
-                    let index = GeoMapIndex::Immutable(ImmutableGeoMapIndex::open_mmap(*index));
+                    let index =
+                        GeoMapIndex::Immutable(ImmutableGeoMapIndex::open_mmap(*index).unwrap());
                     Ok(index)
                 }
             }
@@ -1233,9 +1235,12 @@ mod tests {
     fn test_payload_blocks(#[case] index_type: IndexType) {
         let (field_index, _, _) = build_random_index(1000, 5, index_type);
         let hw_counter = HardwareCounterCell::new();
-        let top_level_points = field_index.points_of_hash(&Default::default(), &hw_counter);
+        let top_level_points = field_index.points_of_hash(Default::default(), &hw_counter);
         assert_eq!(top_level_points, 1_000);
-        let block_hashes = field_index.large_hashes(100).collect_vec();
+        let block_hashes = field_index
+            .large_hashes(100)
+            .map(Result::unwrap)
+            .collect_vec();
         assert!(!block_hashes.is_empty());
         for (geohash, size) in block_hashes {
             assert_eq!(geohash.len(), 1);
@@ -1245,6 +1250,7 @@ mod tests {
 
         let blocks = field_index
             .payload_blocks(100, JsonPath::new("test"))
+            .map(Result::unwrap)
             .collect_vec();
         blocks.iter().for_each(|block| {
             let hw_acc = HwMeasurementAcc::new();
@@ -1437,11 +1443,14 @@ mod tests {
             IndexType::Mmap => GeoMapIndex::new_mmap(temp_dir.path(), false)
                 .unwrap()
                 .unwrap(),
-            IndexType::RamMmap => GeoMapIndex::Immutable(ImmutableGeoMapIndex::open_mmap(
-                MmapGeoMapIndex::open(temp_dir.path(), false)
-                    .unwrap()
-                    .unwrap(),
-            )),
+            IndexType::RamMmap => GeoMapIndex::Immutable(
+                ImmutableGeoMapIndex::open_mmap(
+                    MmapGeoMapIndex::open(temp_dir.path(), false)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap(),
+            ),
         };
 
         let berlin_geo_radius = GeoRadius {
@@ -1527,11 +1536,14 @@ mod tests {
             IndexType::Mmap => GeoMapIndex::new_mmap(temp_dir.path(), false)
                 .unwrap()
                 .unwrap(),
-            IndexType::RamMmap => GeoMapIndex::Immutable(ImmutableGeoMapIndex::open_mmap(
-                MmapGeoMapIndex::open(temp_dir.path(), false)
-                    .unwrap()
-                    .unwrap(),
-            )),
+            IndexType::RamMmap => GeoMapIndex::Immutable(
+                ImmutableGeoMapIndex::open_mmap(
+                    MmapGeoMapIndex::open(temp_dir.path(), false)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap(),
+            ),
         };
         assert_eq!(new_index.points_count(), 1);
         if index_type != IndexType::Mmap {
@@ -1723,7 +1735,7 @@ mod tests {
                 index.max_values_per_point(),
             );
             let hw_counter = HardwareCounterCell::disposable();
-            for hash in &hashes {
+            for &hash in &hashes {
                 assert_eq!(
                     indices[0].points_of_hash(hash, &hw_counter),
                     index.points_of_hash(hash, &hw_counter),
@@ -1736,10 +1748,12 @@ mod tests {
             assert_eq!(
                 indices[0]
                     .large_hashes(20)
+                    .map(Result::unwrap)
                     .map(|(hash, _)| hash)
                     .collect::<BTreeSet<_>>(),
                 index
                     .large_hashes(20)
+                    .map(Result::unwrap)
                     .map(|(hash, _)| hash)
                     .collect::<BTreeSet<_>>(),
             );

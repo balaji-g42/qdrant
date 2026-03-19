@@ -1,8 +1,8 @@
 [package]
 name = "api"
-version = "1.17.0"
+version = "1.17.1-dev"
 authors = [
-    "Andrey Vasnetsov <andrey@vasnetsov.com>",
+    "Andrey Vasnetsov <vasnetsov93@gmail.com>",
     "Qdrant Team <info@qdrant.tech>",
 ]
 license = "Apache-2.0"

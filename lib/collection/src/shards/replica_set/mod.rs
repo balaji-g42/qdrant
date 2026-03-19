@@ -19,9 +19,13 @@ use common::budget::ResourceBudget;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::rate_limiting::RateLimiter;
 use common::save_on_disk::SaveOnDisk;
+use common::types::DeferredBehavior;
 use replica_set_state::{ReplicaSetState, ReplicaState};
 use segment::types::{ExtendedPointId, Filter, SeqNumberType, ShardKey};
 use serde::{Deserialize, Serialize};
+use shard::operations::optimization::{
+    OptimizationsRequestOptions, OptimizationsResponse, OptimizationsSummary,
+};
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::spawn_blocking;
@@ -38,10 +42,7 @@ use crate::common::collection_size_stats::CollectionSizeStats;
 use crate::common::snapshots_manager::SnapshotStorageManager;
 use crate::config::CollectionConfigInternal;
 use crate::operations::shared_storage_config::SharedStorageConfig;
-use crate::operations::types::{
-    CollectionError, CollectionResult, OptimizationsRequestOptions, OptimizationsResponse,
-    OptimizationsSummary, UpdateResult, UpdateStatus,
-};
+use crate::operations::types::{CollectionError, CollectionResult, UpdateResult, UpdateStatus};
 use crate::operations::{CollectionUpdateOperations, OperationWithClockTag, point_ops};
 use crate::optimizers_builder::OptimizersConfig;
 use crate::shards::channel_service::ChannelService;
@@ -49,6 +50,7 @@ use crate::shards::dummy_shard::DummyShard;
 use crate::shards::replica_set::clock_set::ClockSet;
 use crate::shards::shard::{PeerId, Shard, ShardId};
 use crate::shards::shard_config::ShardConfig;
+use crate::shards::shard_trait::WaitUntil;
 
 //    │    Collection Created
 //    │
@@ -1045,6 +1047,7 @@ impl ShardReplicaSet {
         filter: Filter,
         hw_measurement_acc: HwMeasurementAcc,
         force: bool,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<UpdateResult> {
         let local_shard_guard = self.local.read().await;
 
@@ -1071,6 +1074,7 @@ impl ShardReplicaSet {
                     &self.search_runtime,
                     None,
                     hw_measurement_acc.clone(),
+                    deferred_behavior,
                 )
                 .await?;
 
@@ -1100,7 +1104,13 @@ impl ShardReplicaSet {
 
         // TODO(resharding): Assign clock tag to the operation!? 🤔
         let result = self
-            .update_local(op.into(), true, None, hw_measurement_acc, force)
+            .update_local(
+                op.into(),
+                WaitUntil::Visible,
+                None,
+                hw_measurement_acc,
+                force,
+            )
             .await?
             .ok_or_else(|| {
                 CollectionError::bad_request(format!(

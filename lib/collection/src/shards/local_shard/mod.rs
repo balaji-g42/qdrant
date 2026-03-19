@@ -31,8 +31,10 @@ use arc_swap::ArcSwap;
 use common::budget::ResourceBudget;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::defaults::log_load_timing;
 use common::rate_limiting::RateLimiter;
 use common::save_on_disk::SaveOnDisk;
+use common::types::DeferredBehavior;
 use common::{panic, tar_ext};
 use fs_err as fs;
 use fs_err::tokio as tokio_fs;
@@ -41,6 +43,7 @@ use futures::stream::FuturesUnordered;
 use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use parking_lot::Mutex as ParkingMutex;
+use segment::common::operation_error::OperationResult;
 use segment::entry::entry_point::NonAppendableSegmentEntry as _;
 use segment::index::field_index::{CardinalityEstimation, EstimationMerge};
 use segment::segment_constructor::{build_segment, load_segment, normalize_segment_dir};
@@ -50,6 +53,7 @@ use segment::types::{
 };
 use shard::files::{NEWEST_CLOCKS_PATH, OLDEST_CLOCKS_PATH, ShardDataFiles};
 use shard::operations::CollectionUpdateOperations;
+use shard::operations::optimization::{OptimizationSegmentInfo, PendingOptimization};
 use shard::operations::point_ops::{PointInsertOperationsInternal, PointOperations};
 use shard::segment_holder::locked::LockedSegmentHolder;
 use shard::wal::SerdeWal;
@@ -72,9 +76,8 @@ use crate::config::CollectionConfigInternal;
 use crate::operations::OperationWithClockTag;
 use crate::operations::shared_storage_config::SharedStorageConfig;
 use crate::operations::types::{
-    CollectionError, CollectionResult, OptimizationSegmentInfo, OptimizersStatus,
-    PendingOptimization, ShardInfoInternal, ShardStatus, ShardUpdateQueueInfo,
-    check_sparse_compatible_with_segment_config,
+    CollectionError, CollectionResult, OptimizersStatus, ShardInfoInternal, ShardStatus,
+    ShardUpdateQueueInfo, check_sparse_compatible_with_segment_config,
 };
 use crate::optimizers_builder::{OptimizersConfig, build_optimizers, clear_temp_segments};
 use crate::shards::CollectionId;
@@ -258,12 +261,6 @@ impl LocalShard {
         let scroll_read_lock = Arc::new(tokio::sync::RwLock::new(()));
         let update_tracker = UpdateTracker::default();
 
-        let prevent_unoptimized_threshold_kb = config
-            .optimizer_config
-            .prevent_unoptimized
-            .unwrap_or_default()
-            .then(|| config.optimizer_config.get_indexing_threshold_kb());
-
         let wal_last_index = locked_wal.lock().await.last_index();
         let applied_seq_handler =
             Arc::new(AppliedSeqHandler::load_or_init(shard_path, wal_last_index));
@@ -281,7 +278,10 @@ impl LocalShard {
             locked_wal.clone(),
             config.optimizer_config.flush_interval_sec,
             config.optimizer_config.max_optimization_threads,
-            prevent_unoptimized_threshold_kb,
+            config
+                .optimizer_config
+                .prevent_unoptimized
+                .unwrap_or_default(),
             clocks.clone(),
             shard_path.into(),
             scroll_read_lock.clone(),
@@ -346,10 +346,17 @@ impl LocalShard {
         search_runtime: Handle,
         optimizer_resource_budget: ResourceBudget,
     ) -> CollectionResult<LocalShard> {
+        let total_started = Instant::now();
+
         let collection_config_read = collection_config.read().await;
 
         let wal_path = Self::wal_path(shard_path);
         let segments_path = Self::segments_path(shard_path);
+
+        let deferred_internal_id = collection_config_read.params.get_deferred_point_id(
+            &collection_config_read.hnsw_config,
+            effective_optimizers_config.get_deferred_points_threshold_bytes(),
+        );
 
         let wal: SerdeWal<OperationWithClockTag> =
             SerdeWal::new(&wal_path, (&collection_config_read.wal_config).into())
@@ -406,7 +413,12 @@ impl LocalShard {
                     let Some((segment_path, uuid)) = normalize_segment_dir(&segment_path)? else {
                         return CollectionResult::Ok(None);
                     };
-                    let mut segment = load_segment(&segment_path, uuid, &AtomicBool::new(false))?;
+                    let mut segment = load_segment(
+                        &segment_path,
+                        uuid,
+                        deferred_internal_id,
+                        &AtomicBool::new(false),
+                    )?;
 
                     segment.check_consistency_and_repair()?;
 
@@ -484,11 +496,12 @@ impl LocalShard {
                 "Shard has no appendable segments, this should never happen. Creating new appendable segment now",
             );
             let segments_path = LocalShard::segments_path(shard_path);
-            let segment_config = collection_config.read().await.to_base_segment_config()?;
+            let segment_config = collection_config.read().await.to_base_segment_config();
             segment_holder.create_appendable_segment(
                 &segments_path,
                 segment_config,
                 payload_index_schema.clone(),
+                deferred_internal_id,
             )?;
         }
 
@@ -510,6 +523,8 @@ impl LocalShard {
 
         // Apply outstanding operations from WAL
         local_shard.load_from_wal(collection_id).await?;
+
+        log_load_timing(shard_path, "total", total_started);
 
         Ok(local_shard)
     }
@@ -597,9 +612,13 @@ impl LocalShard {
 
         let vector_params = config
             .params
-            .to_base_vector_data(config.quantization_config.as_ref())?;
-        let sparse_vector_params = config.params.to_sparse_vector_data()?;
+            .to_base_vector_data(config.quantization_config.as_ref());
+        let sparse_vector_params = config.params.to_sparse_vector_data();
         let segment_number = config.optimizer_config.get_number_segments();
+        let deferred_internal_id = config.params.get_deferred_point_id(
+            &config.hnsw_config,
+            effective_optimizers_config.get_deferred_points_threshold_bytes(),
+        );
 
         for _sid in 0..segment_number {
             let path_clone = segments_path.clone();
@@ -610,7 +629,9 @@ impl LocalShard {
             };
             let segment = thread::Builder::new()
                 .name(format!("shard-build-{collection_id}-{id}"))
-                .spawn(move || build_segment(&path_clone, &segment_config, true))
+                .spawn(move || {
+                    build_segment(&path_clone, &segment_config, deferred_internal_id, true)
+                })
                 .unwrap();
             build_handlers.push(segment);
         }
@@ -840,6 +861,7 @@ impl LocalShard {
                         op_num,
                         operation: None,
                         sender: None,
+                        wait_for_deferred: false,
                         hw_measurements: hw_measurements.clone(),
                     }))
                     .await?;
@@ -907,7 +929,7 @@ impl LocalShard {
         let hw_counter = hw_measurement_acc.get_counter_cell();
         // clone filter for spawning task
         let filter = filter.cloned();
-        let cardinality = tokio::task::spawn_blocking(move || {
+        let cardinality = tokio::task::spawn_blocking(move || -> OperationResult<_> {
             // Collect the segments first so we don't lock the segment holder during the operations.
             let segments = segments
                 .read()
@@ -923,9 +945,9 @@ impl LocalShard {
                         .read() // blocking sync lock
                         .estimate_point_count(filter.as_ref(), &hw_counter)
                 })
-                .merge_independent()
+                .process_results(|iter| iter.merge_independent())
         });
-        let cardinality = AbortOnDropHandle::new(cardinality).await?;
+        let cardinality = AbortOnDropHandle::new(cardinality).await??;
         Ok(cardinality)
     }
 
@@ -935,9 +957,18 @@ impl LocalShard {
         runtime_handle: &Handle,
         hw_counter: HwMeasurementAcc,
         timeout: Option<Duration>,
+        deferred_behavior: DeferredBehavior,
     ) -> CollectionResult<BTreeSet<PointIdType>> {
         let segments = self.segments.clone();
-        SegmentsSearcher::read_filtered(segments, filter, runtime_handle, hw_counter, timeout).await
+        SegmentsSearcher::read_filtered(
+            segments,
+            filter,
+            runtime_handle,
+            hw_counter,
+            timeout,
+            deferred_behavior,
+        )
+        .await
     }
 
     pub fn local_update_queue_info(&self) -> ShardUpdateQueueInfo {

@@ -8,7 +8,7 @@ use common::progress_tracker::ProgressTracker;
 use common::types::{ScoredPointOffset, TelemetryDetail};
 use ordered_float::OrderedFloat;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rstest::rstest;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, QueryVector, only_default_vector};
 use segment::entry::entry_point::SegmentEntry;
@@ -45,7 +45,7 @@ fn compare_search_result(result_a: &[Vec<ScoredPointOffset>], result_b: &[Vec<Sc
 #[rstest]
 #[case::nearest(QueryVariant::Nearest, VectorStorageDatatype::Uint8, 32, 10)]
 #[case::nearest(QueryVariant::Nearest, VectorStorageDatatype::Float16, 32, 10)]
-#[case::discovery(QueryVariant::Discovery, VectorStorageDatatype::Uint8, 128, 20)]
+#[case::discover(QueryVariant::Discover, VectorStorageDatatype::Uint8, 128, 20)]
 #[case::reco_best_score(QueryVariant::RecoBestScore, VectorStorageDatatype::Float16, 64, 20)]
 #[case::reco_sum_scores(QueryVariant::RecoSumScores, VectorStorageDatatype::Float16, 64, 20)]
 fn test_byte_storage_hnsw(
@@ -99,7 +99,7 @@ fn test_byte_storage_hnsw(
     let int_key = "int";
 
     let mut segment_float = build_simple_segment(dir_float.path(), dim, distance).unwrap();
-    let mut segment_byte = build_segment(dir_byte.path(), &config_byte, true).unwrap();
+    let mut segment_byte = build_segment(dir_byte.path(), &config_byte, None, true).unwrap();
     // check that `segment_byte` uses byte or half storage
     {
         let borrowed_storage = segment_byte.vector_data[DEFAULT_VECTOR_NAME]

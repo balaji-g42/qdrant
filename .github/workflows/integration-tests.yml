@@ -76,7 +76,7 @@ jobs:
         run: uv --project tests run pytest tests/consensus_tests --durations=10
         timeout-minutes: 60
       - name: upload logs
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           path: consensus_test_logs
@@ -99,9 +99,9 @@ jobs:
           uv --project tests lock --check
           uv --project tests sync
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Docker build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           tags: qdrant_consensus
@@ -129,11 +129,11 @@ jobs:
         with:
           shared-key: integration-tests
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Install dependencies
         run: sudo apt-get install -y clang jq
       - name: Docker build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: tools/schema2openapi
           tags: schema2openapi
@@ -238,7 +238,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Install uv and Python dependencies
         run: |
           curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | sh
@@ -246,10 +246,10 @@ jobs:
           uv --project tests lock --check
           uv --project tests sync
       - name: Build Qdrant Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
-          tags: balajig4292/qdrant:e2e-tests
+          tags: qdrant/qdrant:e2e-tests
           cache-from: |
             type=gha,scope=${{ github.ref }}-e2e
             type=gha,scope=${{ github.base_ref }}-e2e
@@ -265,7 +265,7 @@ jobs:
         shell: bash
         timeout-minutes: 20
       - name: Upload test logs on failure
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: e2e-test-logs

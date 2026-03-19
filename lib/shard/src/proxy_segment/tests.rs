@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::tar_ext;
+use common::types::DeferredBehavior;
 use fs_err::File;
 use segment::data_types::named_vectors::NamedVectors;
 use segment::data_types::query_context::QueryContext;
@@ -223,21 +224,31 @@ fn test_read_filter() {
         "blue".to_string().into(),
     )));
 
-    let original_points = original_segment.get().read().read_filtered(
-        None,
-        Some(100),
-        None,
-        &is_stopped,
-        &hw_counter,
-    );
+    let original_points = original_segment
+        .get()
+        .read()
+        .read_filtered(
+            None,
+            Some(100),
+            None,
+            &is_stopped,
+            &hw_counter,
+            DeferredBehavior::Exclude,
+        )
+        .unwrap();
 
-    let original_points_filtered = original_segment.get().read().read_filtered(
-        None,
-        Some(100),
-        Some(&filter),
-        &is_stopped,
-        &hw_counter,
-    );
+    let original_points_filtered = original_segment
+        .get()
+        .read()
+        .read_filtered(
+            None,
+            Some(100),
+            Some(&filter),
+            &is_stopped,
+            &hw_counter,
+            DeferredBehavior::Exclude,
+        )
+        .unwrap();
 
     let mut proxy_segment = wrap_proxy(original_segment);
 
@@ -247,9 +258,26 @@ fn test_read_filter() {
         .delete_point(100, 2.into(), &hw_counter)
         .unwrap();
 
-    let proxy_res = proxy_segment.read_filtered(None, Some(100), None, &is_stopped, &hw_counter);
-    let proxy_res_filtered =
-        proxy_segment.read_filtered(None, Some(100), Some(&filter), &is_stopped, &hw_counter);
+    let proxy_res = proxy_segment
+        .read_filtered(
+            None,
+            Some(100),
+            None,
+            &is_stopped,
+            &hw_counter,
+            DeferredBehavior::Exclude,
+        )
+        .unwrap();
+    let proxy_res_filtered = proxy_segment
+        .read_filtered(
+            None,
+            Some(100),
+            Some(&filter),
+            &is_stopped,
+            &hw_counter,
+            DeferredBehavior::Exclude,
+        )
+        .unwrap();
 
     assert_eq!(original_points_filtered.len() - 1, proxy_res_filtered.len());
     assert_eq!(original_points.len() - 1, proxy_res.len());

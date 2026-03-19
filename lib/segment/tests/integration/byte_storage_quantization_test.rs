@@ -9,7 +9,7 @@ use common::progress_tracker::ProgressTracker;
 use common::types::ScoredPointOffset;
 use ordered_float::OrderedFloat;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rstest::rstest;
 use segment::data_types::vectors::{
     DEFAULT_VECTOR_NAME, DenseVector, QueryVector, only_default_vector,
@@ -91,8 +91,8 @@ fn sames_count(a: &[Vec<ScoredPointOffset>], b: &[Vec<ScoredPointOffset>]) -> us
     32, // ef
     5., // min_acc out of 100
 )]
-#[case::discovery_binary_dot(
-    QueryVariant::Discovery,
+#[case::discover_binary_dot(
+    QueryVariant::Discover,
     VectorStorageDatatype::Uint8,
     QuantizationVariant::Binary,
     Distance::Dot,
@@ -127,8 +127,8 @@ fn sames_count(a: &[Vec<ScoredPointOffset>], b: &[Vec<ScoredPointOffset>]) -> us
     32, // ef
     25., // min_acc out of 100
 )]
-#[case::discovery_binary_cosine(
-    QueryVariant::Discovery,
+#[case::discover_binary_cosine(
+    QueryVariant::Discover,
     VectorStorageDatatype::Uint8,
     QuantizationVariant::Binary,
     Distance::Cosine,
@@ -237,7 +237,7 @@ fn test_byte_storage_binary_quantization_hnsw(
 
     let int_key = "int";
 
-    let mut segment_byte = build_segment(dir_byte.path(), &config_byte, true).unwrap();
+    let mut segment_byte = build_segment(dir_byte.path(), &config_byte, None, true).unwrap();
     // check that `segment_byte` uses byte or half storage
     {
         let borrowed_storage = segment_byte.vector_data[DEFAULT_VECTOR_NAME]

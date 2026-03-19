@@ -8,7 +8,7 @@ use common::types::PointOffsetType;
 use criterion::{Criterion, criterion_group, criterion_main};
 use itertools::Itertools;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use segment::fixtures::payload_context_fixture::{
     create_plain_payload_index, create_struct_payload_index,
 };
@@ -38,7 +38,7 @@ fn conditional_plain_search_benchmark(c: &mut Criterion) {
         b.iter(|| {
             let filter = random_must_filter(&mut rng, 2);
             result_size += plain_index
-                .query_points(&filter, &hw_counter, &is_stopped)
+                .query_points(&filter, &hw_counter, &is_stopped, None)
                 .len();
             query_count += 1;
         })
@@ -58,7 +58,7 @@ fn conditional_plain_search_benchmark(c: &mut Criterion) {
         b.iter(|| {
             let filter = random_must_filter(&mut rng, 1);
             result_size += plain_index
-                .query_points(&filter, &hw_counter, &is_stopped)
+                .query_points(&filter, &hw_counter, &is_stopped, None)
                 .len();
             query_count += 1;
         })
@@ -161,7 +161,7 @@ fn conditional_struct_search_benchmark(c: &mut Criterion) {
         b.iter(|| {
             let filter = random_must_filter(&mut rng, 2);
             result_size += struct_index
-                .query_points(&filter, &hw_counter, &is_stopped)
+                .query_points(&filter, &hw_counter, &is_stopped, None)
                 .len();
             query_count += 1;
         })

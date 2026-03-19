@@ -4,6 +4,7 @@ use std::sync::Arc;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::save_on_disk::SaveOnDisk;
 use common::storage_version::StorageVersion;
+use common::types::PointOffsetType;
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 use segment::common::operation_error::OperationResult;
 use segment::entry::NonAppendableSegmentEntry as _;
@@ -36,6 +37,7 @@ impl SegmentHolder {
         segments_path: &Path,
         segment_config: Option<SegmentConfig>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
+        deferred_internal_id: Option<PointOffsetType>,
     ) -> OperationResult<(
         Vec<(SegmentId, LockedSegment)>,
         SegmentId,
@@ -50,6 +52,7 @@ impl SegmentHolder {
             segments_path,
             segment_config,
             payload_index_schema,
+            deferred_internal_id,
             false,
         )?;
 

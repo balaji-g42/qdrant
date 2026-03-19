@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use ahash::AHashMap;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::fs::safe_delete_with_suffix;
-use common::types::TelemetryDetail;
+use common::types::{DeferredBehavior, TelemetryDetail};
 use uuid::Uuid;
 
 use super::Segment;
@@ -24,7 +24,9 @@ use crate::data_types::query_context::{
 use crate::data_types::segment_record::{NamedVectorsOwned, SegmentRecord};
 use crate::data_types::vectors::{QueryVector, VectorInternal};
 use crate::entry::entry_point::{NonAppendableSegmentEntry, SegmentEntry};
+use crate::id_tracker::IdTracker;
 use crate::index::field_index::{CardinalityEstimation, FieldIndex};
+use crate::index::query_estimator::adjust_for_deferred_points;
 use crate::index::{BuildIndexResult, PayloadIndex, VectorIndex};
 use crate::json_path::JsonPath;
 use crate::payload_storage::PayloadStorage;
@@ -74,7 +76,8 @@ impl NonAppendableSegmentEntry for Segment {
             .vector_data
             .get(vector_name)
             .ok_or_else(|| OperationError::vector_name_not_exists(vector_name))?;
-        let vector_query_context = query_context.get_vector_context(vector_name);
+        let vector_query_context =
+            query_context.get_vector_context(vector_name, self.deferred_internal_id);
         let internal_results = vector_data.vector_index.borrow().search(
             query_vectors,
             filter,
@@ -173,8 +176,24 @@ impl NonAppendableSegmentEntry for Segment {
         with_vector: &WithVector,
         hw_counter: &HardwareCounterCell,
         is_stopped: &AtomicBool,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<AHashMap<ExtendedPointId, SegmentRecord>> {
         let mut records = AHashMap::with_capacity(point_ids.len());
+
+        // Filter out deferred points. This is done in two stages to prevent cloning `point_ids` and iterating more that needed
+        // but still satisfy rusts ownership constraints.
+        let behavior_allows_filtering = !deferred_behavior.include_all_points();
+        let filter_deferred = self.deferred_points_count() > 0 && behavior_allows_filtering;
+        let filtered_point_ids = filter_deferred.then(|| {
+            point_ids
+                .iter()
+                .filter(|&&point_id| !self.point_is_deferred(point_id))
+                .copied()
+                .collect::<Vec<_>>()
+        });
+
+        // Stage two: Select the correct slice and shadow `point_ids`.
+        let point_ids = filtered_point_ids.as_deref().unwrap_or(point_ids);
 
         let mut update_record_vector =
             |vector_name: &VectorNameBuf,
@@ -262,19 +281,32 @@ impl NonAppendableSegmentEntry for Segment {
         filter: Option<&'a Filter>,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
-    ) -> Vec<PointIdType> {
-        match filter {
-            None => self.read_by_id_stream(offset, limit),
+        deferred_behavior: DeferredBehavior,
+    ) -> OperationResult<Vec<PointIdType>> {
+        Ok(match filter {
+            None => self.read_by_id_stream(offset, limit, deferred_behavior),
             Some(condition) => {
                 if self.should_pre_filter(condition, limit, hw_counter) {
-                    self.filtered_read_by_index(offset, limit, condition, is_stopped, hw_counter)
+                    self.filtered_read_by_index(
+                        offset,
+                        limit,
+                        condition,
+                        is_stopped,
+                        hw_counter,
+                        deferred_behavior,
+                    )
                 } else {
                     self.filtered_read_by_id_stream(
-                        offset, limit, condition, is_stopped, hw_counter,
+                        offset,
+                        limit,
+                        condition,
+                        is_stopped,
+                        hw_counter,
+                        deferred_behavior,
                     )
                 }
             }
-        }
+        })
     }
 
     fn read_ordered_filtered<'a>(
@@ -284,15 +316,26 @@ impl NonAppendableSegmentEntry for Segment {
         order_by: &'a OrderBy,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>> {
         match filter {
-            None => {
-                self.filtered_read_by_value_stream(order_by, limit, None, is_stopped, hw_counter)
-            }
+            None => self.filtered_read_by_value_stream(
+                order_by,
+                limit,
+                None,
+                is_stopped,
+                hw_counter,
+                deferred_behavior,
+            ),
             Some(filter) => {
                 if self.should_pre_filter(filter, limit, hw_counter) {
                     self.filtered_read_by_index_ordered(
-                        order_by, limit, filter, is_stopped, hw_counter,
+                        order_by,
+                        limit,
+                        filter,
+                        is_stopped,
+                        hw_counter,
+                        deferred_behavior,
                     )
                 } else {
                     self.filtered_read_by_value_stream(
@@ -301,6 +344,7 @@ impl NonAppendableSegmentEntry for Segment {
                         Some(filter),
                         is_stopped,
                         hw_counter,
+                        deferred_behavior,
                     )
                 }
             }
@@ -313,8 +357,8 @@ impl NonAppendableSegmentEntry for Segment {
         filter: Option<&Filter>,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
-    ) -> Vec<PointIdType> {
-        match filter {
+    ) -> OperationResult<Vec<PointIdType>> {
+        Ok(match filter {
             None => self.read_by_random_id(limit),
             Some(condition) => {
                 if self.should_pre_filter(condition, Some(limit), hw_counter) {
@@ -323,7 +367,7 @@ impl NonAppendableSegmentEntry for Segment {
                     self.filtered_read_by_random_stream(limit, condition, is_stopped, hw_counter)
                 }
             }
-        }
+        })
     }
 
     fn read_range(&self, from: Option<PointIdType>, to: Option<PointIdType>) -> Vec<PointIdType> {
@@ -368,10 +412,10 @@ impl NonAppendableSegmentEntry for Segment {
         &'a self,
         filter: Option<&'a Filter>,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
-        match filter {
+    ) -> OperationResult<CardinalityEstimation> {
+        Ok(match filter {
             None => {
-                let available = self.available_point_count();
+                let available = self.non_deferred_point_count_estimated();
                 CardinalityEstimation {
                     primary_clauses: vec![],
                     min: available,
@@ -381,9 +425,13 @@ impl NonAppendableSegmentEntry for Segment {
             }
             Some(filter) => {
                 let payload_index = self.payload_index.borrow();
-                payload_index.estimate_cardinality(filter, hw_counter)
+                let cardinality = payload_index.estimate_cardinality(filter, hw_counter);
+
+                let total_points = self.id_tracker.borrow().available_point_count();
+                let available_points = self.non_deferred_point_count_estimated();
+                adjust_for_deferred_points(cardinality, available_points, total_points)
             }
-        }
+        })
     }
 
     fn unique_values(
@@ -475,7 +523,7 @@ impl NonAppendableSegmentEntry for Segment {
             segment_type: self.segment_type,
             num_vectors,
             num_indexed_vectors,
-            num_points: self.available_point_count(),
+            num_points: self.non_deferred_point_count_estimated(),
             num_deleted_vectors: self.deleted_point_count(),
             vectors_size_bytes,  // Considers vector storage, but not indices
             payloads_size_bytes, // Considers payload storage, but not indices
@@ -484,6 +532,7 @@ impl NonAppendableSegmentEntry for Segment {
             is_appendable: self.appendable_flag,
             index_schema: HashMap::new(),
             vector_data: vector_data_info,
+            deferred_internal_id: self.deferred_internal_id,
         }
     }
 
@@ -867,6 +916,27 @@ impl NonAppendableSegmentEntry for Segment {
             }
         }
     }
+
+    fn point_is_deferred(&self, point_id: PointIdType) -> bool {
+        if let Some(deferred_from) = self.deferred_internal_id
+            && let Some(internal_id) = self.id_tracker.borrow().internal_id(point_id)
+        {
+            return self.is_appendable() && internal_id >= deferred_from;
+        };
+        false
+    }
+
+    fn deferred_point_ids(&self) -> Vec<PointIdType> {
+        let Some(deferred_from) = self.deferred_internal_id else {
+            return vec![];
+        };
+        let id_tracker = self.id_tracker.borrow();
+        id_tracker
+            .iter_internal()
+            .skip_while(|&internal_id| internal_id < deferred_from)
+            .filter_map(|internal_id| id_tracker.external_id(internal_id))
+            .collect()
+    }
 }
 
 impl SegmentEntry for Segment {
@@ -1046,5 +1116,16 @@ impl SegmentEntry for Segment {
                 missed_point_id: point_id,
             }),
         })
+    }
+
+    fn deferred_points_count(&self) -> usize {
+        if let Some(deferred_from) = self.deferred_internal_id
+            && self.is_appendable()
+        {
+            return self
+                .total_point_count()
+                .saturating_sub(deferred_from as usize);
+        }
+        0
     }
 }

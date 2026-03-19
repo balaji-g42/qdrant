@@ -1,4 +1,5 @@
 use std::alloc::Layout;
+use std::borrow::Cow;
 use std::fmt;
 use std::mem::MaybeUninit;
 use std::ops::Range;
@@ -10,7 +11,6 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::maybe_uninit::maybe_uninit_fill_from;
 use common::types::PointOffsetType;
 use sparse::common::sparse_vector::SparseVector;
-use zerocopy::IntoBytes;
 
 use super::dense::memmap_dense_vector_storage::MemmapDenseVectorStorage;
 #[cfg(feature = "rocksdb")]
@@ -24,11 +24,11 @@ use super::sparse::mmap_sparse_vector_storage::MmapSparseVectorStorage;
 use super::sparse::volatile_sparse_vector_storage::VolatileSparseVectorStorage;
 use crate::common::Flusher;
 use crate::common::operation_error::{OperationError, OperationResult};
-use crate::data_types::named_vectors::CowVector;
+use crate::data_types::named_vectors::{CowMultiVector, CowVector};
 use crate::data_types::primitive::PrimitiveVectorElement;
 use crate::data_types::vectors::{
-    MultiDenseVectorInternal, TypedMultiDenseVectorRef, VectorElementType, VectorElementTypeByte,
-    VectorElementTypeHalf, VectorInternal, VectorRef,
+    MultiDenseVectorInternal, VectorElementType, VectorElementTypeByte, VectorElementTypeHalf,
+    VectorInternal, VectorRef,
 };
 use crate::types::{Distance, MultiVectorConfig, VectorStorageDatatype};
 use crate::vector_storage::common::VECTOR_READ_BATCH_SIZE;
@@ -182,11 +182,14 @@ pub trait VectorStorage {
 pub trait DenseVectorStorage<T: PrimitiveVectorElement>: VectorStorage {
     fn vector_dim(&self) -> usize;
 
-    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> &[T];
+    fn get_dense<P: AccessPattern>(&self, key: PointOffsetType) -> Cow<'_, [T]>;
 
     /// Get the raw bytes of the vector by the given key if it exists
-    fn get_dense_bytes_opt<P: AccessPattern>(&self, key: PointOffsetType) -> Option<&[u8]> {
-        ((key as usize) < self.total_vector_count()).then(|| self.get_dense::<P>(key).as_bytes())
+    fn get_dense_bytes_opt<P: AccessPattern>(&self, key: PointOffsetType) -> Option<Cow<'_, [u8]>> {
+        ((key as usize) < self.total_vector_count()).then(|| match self.get_dense::<P>(key) {
+            Cow::Borrowed(slice) => Cow::Borrowed(bytemuck::cast_slice(slice)),
+            Cow::Owned(vec) => Cow::Owned(bytemuck::cast_vec(vec)),
+        })
     }
 
     /// Get layout for a single vector
@@ -200,7 +203,7 @@ pub trait DenseVectorStorage<T: PrimitiveVectorElement>: VectorStorage {
     /// Implementation can assume that the keys are consecutive
     fn for_each_in_dense_batch<F: FnMut(usize, &[T])>(&self, keys: &[PointOffsetType], mut f: F) {
         for (idx, &key) in keys.iter().enumerate() {
-            f(idx, self.get_dense::<Random>(key));
+            f(idx, &self.get_dense::<Random>(key));
         }
     }
 
@@ -219,22 +222,22 @@ pub trait SparseVectorStorage: VectorStorage {
 
 pub trait MultiVectorStorage<T: PrimitiveVectorElement>: VectorStorage {
     fn vector_dim(&self) -> usize;
-    fn get_multi<P: AccessPattern>(&self, key: PointOffsetType) -> TypedMultiDenseVectorRef<'_, T>;
+    fn get_multi<P: AccessPattern>(&self, key: PointOffsetType) -> CowMultiVector<'_, T>;
     fn get_multi_opt<P: AccessPattern>(
         &self,
         key: PointOffsetType,
-    ) -> Option<TypedMultiDenseVectorRef<'_, T>>;
+    ) -> Option<CowMultiVector<'_, T>>;
     fn get_batch_multi<'a>(
         &'a self,
         keys: &[PointOffsetType],
-        vectors: &'a mut [MaybeUninit<TypedMultiDenseVectorRef<'a, T>>],
-    ) -> &'a [TypedMultiDenseVectorRef<'a, T>] {
+        vectors: &'a mut [MaybeUninit<CowMultiVector<'a, T>>],
+    ) -> &'a [CowMultiVector<'a, T>] {
         debug_assert_eq!(keys.len(), vectors.len());
         debug_assert!(keys.len() <= VECTOR_READ_BATCH_SIZE);
         let iter = keys.iter().map(|key| self.get_multi::<Random>(*key));
         maybe_uninit_fill_from(vectors, iter).0
     }
-    fn iterate_inner_vectors(&self) -> impl Iterator<Item = &[T]> + Clone + Send;
+    fn iterate_inner_vectors(&self) -> impl Iterator<Item = Cow<'_, [T]>> + Clone + Send;
     fn multi_vector_config(&self) -> &MultiVectorConfig;
 
     fn size_of_available_vectors_in_bytes(&self) -> usize;
@@ -537,7 +540,10 @@ impl VectorStorageEnum {
     }
 
     /// Get the raw bytes of the vector by the given key if it exists
-    pub fn get_vector_bytes_opt<P: AccessPattern>(&self, key: PointOffsetType) -> Option<&[u8]> {
+    pub fn get_vector_bytes_opt<P: AccessPattern>(
+        &self,
+        key: PointOffsetType,
+    ) -> Option<Cow<'_, [u8]>> {
         match self {
             #[cfg(feature = "rocksdb")]
             VectorStorageEnum::DenseSimple(v) => v.get_dense_bytes_opt::<P>(key),

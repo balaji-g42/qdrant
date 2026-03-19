@@ -258,6 +258,11 @@ impl SnapshotStorageLocalFS {
         Ok(snapshots)
     }
 
+    /// Stores a snapshot in local storage and writes its checksum first.
+    ///
+    /// The checksum file is explicitly flushed and closed before moving the
+    /// snapshot into place, so checksum readers do not observe a partially
+    /// written checksum file.
     async fn store_file(
         &self,
         source_path: &Path,
@@ -279,15 +284,17 @@ impl SnapshotStorageLocalFS {
         // We can't move right away, because snapshot folder can be on another mounting point.
         // We can't copy to the target location directly, because copy is not atomic.
         // So we copy to the final location with a temporary name and then rename atomically.
-        let target_path_tmp = TempPath::from_path(target_path.with_extension("tmp"));
+        let target_path_tmp = TempPath::try_from_path(target_path.with_extension("tmp"))?;
 
         // compute and store the file's checksum before the final snapshot file is saved
         // to avoid making snapshot available without checksum
         let checksum_path = get_checksum_path(target_path);
         let checksum = hash_file(source_path).await?;
-        let checksum_file = TempPath::from_path(&checksum_path);
+        let checksum_file = TempPath::try_from_path(&checksum_path)?;
         let mut file = tokio_fs::File::create(checksum_path.as_path()).await?;
         file.write_all(checksum.as_bytes()).await?;
+        file.flush().await?;
+        drop(file);
 
         move_file(&source_path, &target_path_tmp).await?;
         target_path_tmp.persist(target_path).map_err(|e| e.error)?;

@@ -2,14 +2,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
-use storage::audit::audit_trust_forwarded_headers;
+use storage::audit::{audit_trust_forwarded_headers, extract_tracing_id};
 use storage::rbac::Access;
 use tonic::Status;
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
 
 use super::forwarded;
-use crate::common::auth::{Auth, AuthError, AuthKeys, AuthType};
+use crate::common::auth::{Auth, AuthError, AuthKeys, AuthType, log_denied_auth};
 use crate::common::inference::api_keys::InferenceToken;
 
 type Request = tonic::codegen::http::Request<tonic::transport::Body>;
@@ -37,6 +37,13 @@ async fn check(auth_keys: Arc<AuthKeys>, mut req: Request) -> Result<Request, St
             .map(|addr| addr.ip().to_string())
     });
 
+    let tracing_id = extract_tracing_id(|h| {
+        req.headers()
+            .get(h)
+            .and_then(|val| val.to_str().ok())
+            .map(str::to_string)
+    });
+
     // Allow health check endpoints to bypass authentication
     let path = req.uri().path();
     if path == "/qdrant.Qdrant/HealthCheck" || path == "/grpc.health.v1.Health/Check" {
@@ -46,6 +53,7 @@ async fn check(auth_keys: Arc<AuthKeys>, mut req: Request) -> Result<Request, St
             None,
             remote,
             AuthType::None,
+            tracing_id,
         );
         let inference_token = InferenceToken(None);
 
@@ -58,13 +66,16 @@ async fn check(auth_keys: Arc<AuthKeys>, mut req: Request) -> Result<Request, St
     let (access, inference_token, auth_type, subject) = auth_keys
         .validate_request(|key| req.headers().get(key).and_then(|val| val.to_str().ok()))
         .await
-        .map_err(|e| match e {
-            AuthError::Unauthorized(e) => Status::unauthenticated(e),
-            AuthError::Forbidden(e) => Status::permission_denied(e),
-            AuthError::StorageError(e) => Status::from(e),
+        .map_err(|e| {
+            log_denied_auth(path, remote.clone(), tracing_id.clone(), &e);
+            match e {
+                AuthError::Unauthorized(e) => Status::unauthenticated(e),
+                AuthError::Forbidden(e) => Status::permission_denied(e),
+                AuthError::StorageError(e) => Status::from(e),
+            }
         })?;
 
-    let auth = Auth::new(access, subject, remote, auth_type);
+    let auth = Auth::new(access, subject, remote, auth_type, tracing_id);
 
     let previous = req.extensions_mut().insert(auth);
 
@@ -144,6 +155,12 @@ pub fn extract_auth<R>(req: &mut tonic::Request<R>) -> Auth {
             None,
             None,
             AuthType::None,
+            extract_tracing_id(|h| {
+                req.metadata()
+                    .get(h)
+                    .and_then(|val| val.to_str().ok())
+                    .map(str::to_string)
+            }),
         )
     })
 }

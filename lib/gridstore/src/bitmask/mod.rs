@@ -92,7 +92,7 @@ impl Bitmask {
         let num_regions = mmap_bitslice.len() / config.region_size_blocks;
         let region_gaps = vec![RegionGaps::all_free(config.region_size_blocks as u16); num_regions];
 
-        let mmap_region_gaps = BitmaskGaps::create(dir, region_gaps.into_iter(), config);
+        let mmap_region_gaps = BitmaskGaps::create(dir, region_gaps.into_iter(), config.clone());
 
         Ok(Self {
             config,
@@ -120,7 +120,7 @@ impl Bitmask {
         let mmap = open_write_mmap(&path, AdviceSetting::from(DEFAULT_ADVICE), false)?;
         let mmap_bitslice = MmapBitSlice::from(mmap, 0);
 
-        let bitmask_gaps = BitmaskGaps::open(dir, config)?;
+        let bitmask_gaps = BitmaskGaps::open(dir, config.clone())?;
 
         Ok(Self {
             config,
@@ -134,11 +134,14 @@ impl Bitmask {
         dir.join(BITMASK_NAME)
     }
 
-    pub fn flush(&self) -> Result<()> {
-        self.bitslice.flusher()()?;
-        self.regions_gaps.flush()?;
-
-        Ok(())
+    pub fn flusher(&self) -> impl FnOnce() -> Result<()> + Send + use<> {
+        let bitslice_flusher = self.bitslice.flusher();
+        let gaps_flusher = self.regions_gaps.flusher();
+        move || {
+            bitslice_flusher()?;
+            gaps_flusher()?;
+            Ok(())
+        }
     }
 
     /// Compute the size of the storage in bytes.
@@ -552,7 +555,7 @@ mod tests {
     use bitvec::bits;
     use bitvec::vec::BitVec;
     use proptest::prelude::*;
-    use rand::{Rng, rng};
+    use rand::{RngExt, rng};
 
     use crate::config::{DEFAULT_BLOCK_SIZE_BYTES, DEFAULT_REGION_SIZE_BLOCKS, StorageOptions};
 

@@ -10,7 +10,7 @@ use common::types::{PointOffsetType, TelemetryDetail};
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rstest::rstest;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, QueryVector, only_default_vector};
 use segment::entry::entry_point::SegmentEntry;
@@ -36,7 +36,7 @@ fn random_query<R: Rng + ?Sized>(variant: &QueryVariant, rng: &mut R, dim: usize
 
 #[rstest]
 #[case::nearest(QueryVariant::Nearest, 32, 5)]
-#[case::discovery(QueryVariant::Discovery, 128, 10)] // tests that check better precision are in `hnsw_discover_test.rs`
+#[case::discover(QueryVariant::Discover, 128, 10)] // tests that check better precision are in `hnsw_discover_test.rs`
 #[case::reco_best_score(QueryVariant::RecoBestScore, 64, 10)]
 #[case::reco_sum_scores(QueryVariant::RecoSumScores, 64, 10)]
 fn test_filterable_hnsw(
@@ -118,6 +118,7 @@ fn _test_filterable_hnsw(
     let borrowed_payload_index = payload_index_ptr.borrow();
     let blocks = borrowed_payload_index
         .payload_blocks(&JsonPath::new(int_key), indexing_threshold)
+        .map(Result::unwrap)
         .collect_vec();
     for block in blocks.iter() {
         assert!(
@@ -130,7 +131,7 @@ fn _test_filterable_hnsw(
     let px = payload_index_ptr.borrow();
     for block in &blocks {
         let filter = Filter::new_must(Condition::Field(block.condition.clone()));
-        let points = px.query_points(&filter, &hw_counter, &stopped);
+        let points = px.query_points(&filter, &hw_counter, &stopped, None);
         for point in points {
             coverage.insert(point, coverage.get(&point).unwrap_or(&0) + 1);
         }
@@ -302,6 +303,7 @@ fn test_hnsw_search_top_zero(#[case] num_vectors: u64, #[case] full_scan_thresho
     let borrowed_payload_index = payload_index_ptr.borrow();
     let blocks = borrowed_payload_index
         .payload_blocks(&JsonPath::new(int_key), indexing_threshold)
+        .map(Result::unwrap)
         .collect_vec();
     for block in blocks.iter() {
         assert!(

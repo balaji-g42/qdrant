@@ -6,7 +6,7 @@ mod tests {
     use quantization::encoded_storage::{TestEncodedStorage, TestEncodedStorageBuilder};
     use quantization::encoded_vectors::{DistanceType, EncodedVectors, VectorParameters};
     use quantization::encoded_vectors_u8::{EncodedVectorsU8, ScalarQuantizationMethod};
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rstest::rstest;
 
     use crate::metrics::{dot_similarity, l1_similarity, l2_similarity};
@@ -49,7 +49,7 @@ mod tests {
 
         for (index, vector) in vector_data.iter().enumerate() {
             let quantized_vector = encoded.get_quantized_vector(index as u32);
-            let score = encoded.score_point_avx(&query_u8, quantized_vector);
+            let score = encoded.score_point_avx(&query_u8, &quantized_vector);
             let orginal_score = dot_similarity(&query, vector);
             assert!((score - orginal_score).abs() < error);
         }
@@ -93,7 +93,7 @@ mod tests {
 
         for (index, vector) in vector_data.iter().enumerate() {
             let quantized_vector = encoded.get_quantized_vector(index as u32);
-            let score = encoded.score_point_avx(&query_u8, quantized_vector);
+            let score = encoded.score_point_avx(&query_u8, &quantized_vector);
             let orginal_score = l2_similarity(&query, vector);
             assert!((score - orginal_score).abs() < error);
         }
@@ -141,7 +141,7 @@ mod tests {
 
         for (index, vector) in vector_data.iter().enumerate() {
             let quantized_vector = encoded.get_quantized_vector(index as u32);
-            let score = encoded.score_point_avx(&query_u8, quantized_vector);
+            let score = encoded.score_point_avx(&query_u8, &quantized_vector);
             let orginal_score = l1_similarity(&query, vector);
             assert!((score - orginal_score).abs() < error);
         }

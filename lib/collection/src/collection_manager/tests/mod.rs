@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 use ahash::AHashMap;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::types::DeferredBehavior;
 use itertools::Itertools;
 use parking_lot::RwLock;
 use segment::data_types::vectors::{VectorStructInternal, only_default_vector};
@@ -85,7 +86,15 @@ fn test_update_proxy_segments() {
             segment
                 .get()
                 .read()
-                .read_filtered(None, Some(100), None, &is_stopped, &hw_counter)
+                .read_filtered(
+                    None,
+                    Some(100),
+                    None,
+                    &is_stopped,
+                    &hw_counter,
+                    DeferredBehavior::Exclude,
+                )
+                .unwrap()
         })
         .sorted()
         .collect_vec();
@@ -294,6 +303,7 @@ fn test_delete_all_point_versions() {
         TEST_TIMEOUT,
         &AtomicBool::new(false),
         HwMeasurementAcc::new(),
+        DeferredBehavior::Exclude,
     )
     .unwrap();
     assert_eq!(
@@ -340,6 +350,7 @@ fn test_delete_all_point_versions() {
         TEST_TIMEOUT,
         &AtomicBool::new(false),
         HwMeasurementAcc::new(),
+        DeferredBehavior::Exclude,
     )
     .unwrap();
     assert!(retrieved.is_empty());
@@ -457,6 +468,7 @@ fn test_proxy_shared_updates() {
         TEST_TIMEOUT,
         &is_stopped,
         HwMeasurementAcc::new(),
+        DeferredBehavior::Exclude,
     )
     .unwrap();
 
@@ -593,6 +605,7 @@ fn test_proxy_shared_updates_same_version() {
         TEST_TIMEOUT,
         &is_stopped,
         HwMeasurementAcc::new(),
+        DeferredBehavior::Exclude,
     )
     .unwrap();
 

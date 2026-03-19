@@ -11,7 +11,6 @@ use api::grpc::qdrant::{
     SearchPointGroups, SearchPoints, SearchResponse,
 };
 use api::grpc::{InferenceUsage, Usage};
-use api::rest::OrderByInterface;
 use collection::collection::distance_matrix::{
     CollectionSearchMatrixRequest, CollectionSearchMatrixResponse,
 };
@@ -22,7 +21,7 @@ use collection::operations::types::{CoreSearchRequest, PointRequestInternal};
 use collection::shards::shard::ShardId;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use segment::data_types::facets::FacetParams;
-use segment::data_types::order_by::OrderBy;
+use segment::data_types::order_by::{OrderBy, OrderByInterface};
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, NamedQuery, VectorInternal};
 use shard::count::CountRequestInternal;
 use shard::query::query_enum::QueryEnum;
@@ -526,9 +525,9 @@ pub async fn discover_batch(
 ) -> Result<Response<DiscoverBatchResponse>, Status> {
     let mut requests = Vec::with_capacity(discover_points.len());
 
-    for discovery_request in discover_points {
+    for discover_request in discover_points {
         let (internal_request, _collection_name, _consistency, _timeout, shard_key_selector) =
-            try_discover_request_from_grpc(discovery_request)?;
+            try_discover_request_from_grpc(discover_request)?;
         let shard_selector = convert_shard_selector_for_read(None, shard_key_selector)?;
         requests.push((internal_request, shard_selector));
     }

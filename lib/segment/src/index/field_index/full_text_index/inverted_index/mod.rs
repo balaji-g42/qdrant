@@ -356,13 +356,13 @@ pub trait InvertedIndex {
         &self,
         threshold: usize,
         key: PayloadKeyType,
-    ) -> impl Iterator<Item = PayloadBlockCondition> + '_ {
+    ) -> impl Iterator<Item = OperationResult<PayloadBlockCondition>> + '_ {
         let map_filter_condition = move |(token, postings_len): (&str, usize)| {
             if postings_len >= threshold {
-                Some(PayloadBlockCondition {
+                Some(Ok(PayloadBlockCondition {
                     condition: FieldCondition::new_match(key.clone(), Match::new_text(token)),
                     cardinality: postings_len,
-                })
+                }))
             } else {
                 None
             }
@@ -389,7 +389,7 @@ pub trait InvertedIndex {
 mod tests {
 
     use common::counter::hardware_counter::HardwareCounterCell;
-    use rand::Rng;
+    use rand::RngExt;
     use rand::seq::SliceRandom;
     use rstest::rstest;
 

@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 
 use ahash::{AHashMap, AHashSet};
 use common::counter::hardware_counter::HardwareCounterCell;
+use common::types::DeferredBehavior;
 use parking_lot::RwLockWriteGuard;
 use segment::common::operation_error::{OperationError, OperationResult};
 use segment::data_types::build_index_result::BuildFieldIndexResult;
@@ -338,7 +339,11 @@ fn upsert_with_payload(
 /// Max amount of points to delete in a batched deletion iteration
 const DELETION_BATCH_SIZE: usize = 512;
 
-/// Tries to delete points from all segments, returns number of actually deleted points
+/// Tries to delete points from all segments, returns number of actually deleted points.
+///
+/// Iterates all segments directly (rather than going through `apply_points`) to ensure
+/// that ALL copies of a point are deleted, including old non-deferred copies in optimized
+/// segments when the latest version is deferred in an appendable segment.
 pub fn delete_points(
     segments: &SegmentHolder,
     op_num: SeqNumberType,
@@ -348,11 +353,19 @@ pub fn delete_points(
     let mut total_deleted_points = 0;
 
     for batch in ids.chunks(DELETION_BATCH_SIZE) {
-        let deleted_points = segments.apply_points(batch, |id, _idx, write_segment| {
-            write_segment.delete_point(op_num, id, hw_counter)
-        })?;
+        for (_segment_id, segment) in segments.iter() {
+            let segment_arc = segment.get();
+            let mut write_segment = segment_arc.write();
+            for &id in batch {
+                if write_segment.delete_point(op_num, id, hw_counter)? {
+                    total_deleted_points += 1;
+                }
+            }
+        }
+    }
 
-        total_deleted_points += deleted_points;
+    if total_deleted_points == 0 {
+        segments.bump_max_segment_version_overwrite(op_num);
     }
 
     Ok(total_deleted_points)
@@ -371,18 +384,18 @@ pub fn delete_points_by_filter(
     let mut points_to_delete: AHashMap<_, _> = segments
         .iter()
         .map(|(segment_id, segment)| {
-            (
-                segment_id,
-                segment.get().read().read_filtered(
-                    None,
-                    None,
-                    Some(filter),
-                    &is_stopped,
-                    hw_counter,
-                ),
-            )
+            let points = segment.get().read().read_filtered(
+                None,
+                None,
+                Some(filter),
+                &is_stopped,
+                hw_counter,
+                // Delete also deferred points.
+                DeferredBehavior::IncludeAll,
+            )?;
+            Ok((segment_id, points))
         })
-        .collect();
+        .collect::<OperationResult<_>>()?;
 
     segments.apply_segments_batched(|s, segment_id| {
         let Some(curr_points) = points_to_delete.get_mut(&segment_id) else {
@@ -460,8 +473,14 @@ pub fn sync_points(
             let with_vector = WithVector::Bool(true);
             let with_payload = WithPayload::from(true);
             // Since we retrieve points, which we already know exist, we expect all of them to be found
-            let stored_records =
-                segment.retrieve(ids, &with_payload, &with_vector, hw_counter, &is_stopped)?;
+            let stored_records = segment.retrieve(
+                ids,
+                &with_payload,
+                &with_vector,
+                hw_counter,
+                &is_stopped,
+                DeferredBehavior::IncludeAll,
+            )?;
             let mut updated = 0;
 
             for (id, stored_record) in stored_records {
@@ -890,7 +909,15 @@ fn points_by_filter(
     // we don’t want to cancel this filtered read
     let is_stopped = AtomicBool::new(false);
     segments.for_each_segment(|s| {
-        let points = s.read_filtered(None, None, Some(filter), &is_stopped, hw_counter);
+        let points = s.read_filtered(
+            None,
+            None,
+            Some(filter),
+            &is_stopped,
+            hw_counter,
+            // Read operation used for updates, so we must handle all points
+            DeferredBehavior::IncludeAll,
+        )?;
         affected_points.extend_from_slice(points.as_slice());
         Ok(true)
     })?;

@@ -2,7 +2,7 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::{PointOffsetType, ScoreType};
 
 use super::query::{
-    ContextQuery, DiscoveryQuery, RecoBestScoreQuery, RecoQuery, RecoSumScoresQuery, TransformInto,
+    ContextQuery, DiscoverQuery, RecoBestScoreQuery, RecoQuery, RecoSumScoresQuery, TransformInto,
 };
 use super::query_scorer::custom_query_scorer::CustomQueryScorer;
 use super::query_scorer::{QueryScorerBytes, QueryScorerBytesImpl};
@@ -11,8 +11,8 @@ use crate::data_types::vectors::{DenseVector, QueryVector, VectorElementType, Ve
 use crate::spaces::metric::Metric;
 use crate::spaces::simple::{CosineMetric, DotProductMetric, EuclidMetric, ManhattanMetric};
 use crate::types::Distance;
+use crate::vector_storage::dense::immutable_dense_vectors::ImmutableDenseVectors;
 use crate::vector_storage::dense::memmap_dense_vector_storage::MemmapDenseVectorStorage;
-use crate::vector_storage::dense::mmap_dense_vectors::MmapDenseVectors;
 use crate::vector_storage::query::NaiveFeedbackQuery;
 use crate::vector_storage::query_scorer::QueryScorer;
 use crate::vector_storage::query_scorer::metric_query_scorer::MetricQueryScorer;
@@ -28,14 +28,17 @@ pub fn new<'a>(
 
 pub struct AsyncRawScorerImpl<'a, TQueryScorer: QueryScorer<TVector = [VectorElementType]>> {
     query_scorer: TQueryScorer,
-    storage: &'a MmapDenseVectors<VectorElementType>,
+    storage: &'a ImmutableDenseVectors<VectorElementType>,
 }
 
 impl<'a, TQueryScorer> AsyncRawScorerImpl<'a, TQueryScorer>
 where
     TQueryScorer: QueryScorer<TVector = [VectorElementType]>,
 {
-    fn new(query_scorer: TQueryScorer, storage: &'a MmapDenseVectors<VectorElementType>) -> Self {
+    fn new(
+        query_scorer: TQueryScorer,
+        storage: &'a ImmutableDenseVectors<VectorElementType>,
+    ) -> Self {
         Self {
             query_scorer,
             storage,
@@ -154,11 +157,10 @@ impl<'a> AsyncRawScorerBuilder<'a> {
                 );
                 Ok(async_raw_scorer_from_query_scorer(query_scorer, storage))
             }
-            QueryVector::Discovery(discovery_query) => {
-                let discovery_query: DiscoveryQuery<DenseVector> =
-                    discovery_query.transform_into()?;
+            QueryVector::Discover(discover_query) => {
+                let discover_query: DiscoverQuery<DenseVector> = discover_query.transform_into()?;
                 let query_scorer = CustomQueryScorer::<_, TMetric, _, _>::new(
-                    discovery_query,
+                    discover_query,
                     storage,
                     hardware_counter,
                 );

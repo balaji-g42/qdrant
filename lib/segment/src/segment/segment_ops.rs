@@ -17,6 +17,7 @@ use crate::common::{check_named_vectors, check_vector_name};
 use crate::data_types::named_vectors::NamedVectors;
 use crate::data_types::vectors::VectorInternal;
 use crate::entry::entry_point::NonAppendableSegmentEntry;
+use crate::id_tracker::IdTracker;
 use crate::index::{PayloadIndex, VectorIndex};
 use crate::types::{
     Payload, PayloadFieldSchema, PayloadKeyType, PointIdType, SegmentState, SeqNumberType,
@@ -650,6 +651,29 @@ impl Segment {
     /// Returns list of IDs without mappings which should be removed from segment
     pub fn fix_id_tracker_inconsistencies(&mut self) -> OperationResult<Vec<PointOffsetType>> {
         self.id_tracker.borrow_mut().fix_inconsistencies()
+    }
+
+    /// Returns the (estimated) amount of deferred points.
+    ///
+    /// This value is an estimation because it does not account for deferred points
+    /// that have been deleted before becoming visible.
+    pub fn deferred_point_count_estimated(&self) -> usize {
+        match self.deferred_internal_id {
+            Some(internal_id) => {
+                let id_tracker = self.id_tracker.borrow();
+                let max_id = id_tracker.total_point_count();
+                max_id.saturating_sub(internal_id as usize)
+            }
+            None => 0,
+        }
+    }
+
+    /// Returns the amount of points that are not deferred.
+    pub fn non_deferred_point_count_estimated(&self) -> usize {
+        self.id_tracker
+            .borrow()
+            .available_point_count()
+            .saturating_sub(self.deferred_point_count_estimated())
     }
 }
 

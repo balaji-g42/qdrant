@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::hash_map::Entry;
 use std::fmt::{Debug, Display};
 use std::hash::{BuildHasher, Hash};
@@ -28,7 +28,7 @@ use self::immutable_map_index::ImmutableMapIndex;
 use self::mutable_map_index::MutableMapIndex;
 use super::FieldIndexBuilderTrait;
 use super::facet_index::FacetIndex;
-use super::mmap_point_to_values::MmapValue;
+use super::stored_point_to_values::StoredValue;
 use crate::common::Flusher;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::data_types::facets::{FacetHit, FacetValueRef};
@@ -58,20 +58,20 @@ pub(super) const BLOCK_SIZE_KEYWORD: usize = 16;
 pub type IdRefIter<'a> = Box<dyn Iterator<Item = &'a PointOffsetType> + 'a>;
 pub type IdIter<'a> = Box<dyn Iterator<Item = PointOffsetType> + 'a>;
 
-pub trait MapIndexKey: Key + MmapValue + Eq + Display + Debug {
+pub trait MapIndexKey: Key + StoredValue + Eq + Display + Debug {
     type Owned: Borrow<Self> + Hash + Eq + Clone + FromStr + Default + 'static;
 
-    fn to_owned(&self) -> Self::Owned;
+    fn to_owned(&self) -> <Self as MapIndexKey>::Owned;
 
     fn gridstore_block_size() -> usize {
-        size_of::<Self::Owned>()
+        size_of::<<Self as MapIndexKey>::Owned>()
     }
 }
 
 impl MapIndexKey for str {
     type Owned = EcoString;
 
-    fn to_owned(&self) -> Self::Owned {
+    fn to_owned(&self) -> <Self as MapIndexKey>::Owned {
         EcoString::from(self)
     }
 
@@ -83,7 +83,7 @@ impl MapIndexKey for str {
 impl MapIndexKey for IntPayloadType {
     type Owned = IntPayloadType;
 
-    fn to_owned(&self) -> Self::Owned {
+    fn to_owned(&self) -> <Self as MapIndexKey>::Owned {
         *self
     }
 }
@@ -91,14 +91,14 @@ impl MapIndexKey for IntPayloadType {
 impl MapIndexKey for UuidIntType {
     type Owned = UuidIntType;
 
-    fn to_owned(&self) -> Self::Owned {
+    fn to_owned(&self) -> <Self as MapIndexKey>::Owned {
         *self
     }
 }
 
 pub enum MapIndex<N: MapIndexKey + ?Sized>
 where
-    Vec<N::Owned>: Blob + Send + Sync,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
 {
     Mutable(MutableMapIndex<N>),
     Immutable(ImmutableMapIndex<N>),
@@ -107,7 +107,7 @@ where
 
 impl<N: MapIndexKey + ?Sized> MapIndex<N>
 where
-    Vec<N::Owned>: Blob + Send + Sync,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
 {
     #[cfg(feature = "rocksdb")]
     pub fn new_rocksdb(
@@ -182,21 +182,20 @@ where
         match self {
             MapIndex::Mutable(index) => index.check_values_any(idx, check_fn),
             MapIndex::Immutable(index) => index.check_values_any(idx, check_fn),
-            MapIndex::Mmap(index) => index.check_values_any(idx, hw_counter, check_fn),
+            // FIXME: don't silently ignore errors. Log error? Update ConditionCheckerFn?
+            MapIndex::Mmap(index) => index
+                .check_values_any(idx, hw_counter, check_fn)
+                .unwrap_or(false),
         }
     }
 
     pub fn get_values(
         &self,
         idx: PointOffsetType,
-    ) -> Option<Box<dyn Iterator<Item = N::Referenced<'_>> + '_>> {
+    ) -> Option<Box<dyn Iterator<Item = Cow<'_, N>> + '_>> {
         match self {
-            MapIndex::Mutable(index) => Some(Box::new(
-                index.get_values(idx)?.map(|v| N::as_referenced(v)),
-            )),
-            MapIndex::Immutable(index) => Some(Box::new(
-                index.get_values(idx)?.map(|v| N::as_referenced(v)),
-            )),
+            MapIndex::Mutable(index) => Some(Box::new(index.get_values(idx)?)),
+            MapIndex::Immutable(index) => Some(Box::new(index.get_values(idx)?)),
             MapIndex::Mmap(index) => Some(Box::new(index.get_values(idx)?)),
         }
     }
@@ -257,11 +256,23 @@ where
         }
     }
 
-    pub fn iter_counts_per_value(&self) -> Box<dyn Iterator<Item = (&N, usize)> + '_> {
+    pub fn iter_counts_per_value(
+        &self,
+        deferred_internal_id: Option<PointOffsetType>,
+    ) -> Box<dyn Iterator<Item = (&N, usize)> + '_> {
         match self {
-            MapIndex::Mutable(index) => Box::new(index.iter_counts_per_value()),
-            MapIndex::Immutable(index) => Box::new(index.iter_counts_per_value()),
-            MapIndex::Mmap(index) => Box::new(index.iter_counts_per_value()),
+            MapIndex::Mutable(index) => Box::new(index.iter_counts_per_value(deferred_internal_id)),
+
+            // Two reasons we don't implement deferred filtering here:
+            //  - We don't have both deferred points and an immutable index.
+            //  - It is not trivial (nor performant) to implement correct filtering for this index variant as
+            //    it doesn't work well in combination with the way it handles deletions.
+            MapIndex::Immutable(index) => {
+                debug_assert!(deferred_internal_id.is_none());
+                Box::new(index.iter_counts_per_value())
+            }
+
+            MapIndex::Mmap(index) => Box::new(index.iter_counts_per_value(deferred_internal_id)),
         }
     }
 
@@ -316,7 +327,9 @@ where
         format!("{value}/{idx}")
     }
 
-    pub fn decode_db_record(s: &str) -> OperationResult<(N::Owned, PointOffsetType)> {
+    pub fn decode_db_record(
+        s: &str,
+    ) -> OperationResult<(<N as MapIndexKey>::Owned, PointOffsetType)> {
         const DECODE_ERR: &str = "Index db parsing error: wrong data format";
         let separator_pos = s
             .rfind('/')
@@ -325,8 +338,8 @@ where
             return Err(OperationError::service_error(DECODE_ERR));
         }
         let value_str = &s[..separator_pos];
-        let value =
-            N::Owned::from_str(value_str).map_err(|_| OperationError::service_error(DECODE_ERR))?;
+        let value = <N as MapIndexKey>::Owned::from_str(value_str)
+            .map_err(|_| OperationError::service_error(DECODE_ERR))?;
         let idx_str = &s[separator_pos + 1..];
         let idx = PointOffsetType::from_str(idx_str)
             .map_err(|_| OperationError::service_error(DECODE_ERR))?;
@@ -563,12 +576,12 @@ where
 
 pub struct MapIndexBuilder<N: MapIndexKey + ?Sized>(MapIndex<N>)
 where
-    Vec<N::Owned>: Blob + Send + Sync;
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync;
 
 impl<N: MapIndexKey + ?Sized> FieldIndexBuilderTrait for MapIndexBuilder<N>
 where
     MapIndex<N>: PayloadFieldIndex + ValueIndexer,
-    Vec<N::Owned>: Blob + Send + Sync,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
 {
     type FieldIndexType = MapIndex<N>;
 
@@ -596,16 +609,16 @@ where
 
 pub struct MapIndexMmapBuilder<N: MapIndexKey + ?Sized> {
     path: PathBuf,
-    point_to_values: Vec<Vec<N::Owned>>,
-    values_to_points: HashMap<N::Owned, Vec<PointOffsetType>>,
+    point_to_values: Vec<Vec<<N as MapIndexKey>::Owned>>,
+    values_to_points: HashMap<<N as MapIndexKey>::Owned, Vec<PointOffsetType>>,
     is_on_disk: bool,
 }
 
 impl<N: MapIndexKey + ?Sized> FieldIndexBuilderTrait for MapIndexMmapBuilder<N>
 where
-    Vec<N::Owned>: Blob + Send + Sync,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
     MapIndex<N>: PayloadFieldIndex + ValueIndexer,
-    <MapIndex<N> as ValueIndexer>::ValueType: Into<N::Owned>,
+    <MapIndex<N> as ValueIndexer>::ValueType: Into<<N as MapIndexKey>::Owned>,
 {
     type FieldIndexType = MapIndex<N>;
 
@@ -624,7 +637,8 @@ where
             let payload_values = <MapIndex<N> as ValueIndexer>::get_values(value);
             flatten_values.extend(payload_values);
         }
-        let flatten_values: Vec<N::Owned> = flatten_values.into_iter().map(Into::into).collect();
+        let flatten_values: Vec<<N as MapIndexKey>::Owned> =
+            flatten_values.into_iter().map(Into::into).collect();
 
         if self.point_to_values.len() <= id as usize {
             self.point_to_values.resize_with(id as usize + 1, Vec::new);
@@ -640,7 +654,7 @@ where
             let entry = self.values_to_points.entry(value);
 
             if let Entry::Vacant(e) = &entry {
-                let size = N::mmapped_size(N::as_referenced(e.key().borrow()));
+                let size = N::stored_size(e.key().borrow());
                 hw_cell_wb.incr_delta(size);
             }
 
@@ -663,7 +677,7 @@ where
 
 pub struct MapIndexGridstoreBuilder<N: MapIndexKey + ?Sized>
 where
-    Vec<N::Owned>: Blob + Send + Sync,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
 {
     dir: PathBuf,
     index: Option<MapIndex<N>>,
@@ -671,7 +685,7 @@ where
 
 impl<N: MapIndexKey + ?Sized> MapIndexGridstoreBuilder<N>
 where
-    Vec<N::Owned>: Blob + Send + Sync,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
 {
     fn new(dir: PathBuf) -> Self {
         Self { dir, index: None }
@@ -680,9 +694,9 @@ where
 
 impl<N: MapIndexKey + ?Sized> FieldIndexBuilderTrait for MapIndexGridstoreBuilder<N>
 where
-    Vec<N::Owned>: Blob + Send + Sync,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
     MapIndex<N>: PayloadFieldIndex + ValueIndexer,
-    <MapIndex<N> as ValueIndexer>::ValueType: Into<N::Owned>,
+    <MapIndex<N> as ValueIndexer>::ValueType: Into<<N as MapIndexKey>::Owned>,
 {
     type FieldIndexType = MapIndex<N>;
 
@@ -853,7 +867,7 @@ impl PayloadFieldIndex for MapIndex<str> {
         &self,
         threshold: usize,
         key: PayloadKeyType,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         Box::new(
             self.iter_values()
                 .map(|value| {
@@ -867,7 +881,8 @@ impl PayloadFieldIndex for MapIndex<str> {
                 .map(move |(value, count)| PayloadBlockCondition {
                     condition: FieldCondition::new_match(key.clone(), value.to_string().into()),
                     cardinality: count,
-                }),
+                })
+                .map(Ok),
         )
     }
 }
@@ -1039,7 +1054,7 @@ impl PayloadFieldIndex for MapIndex<UuidIntType> {
         &self,
         threshold: usize,
         key: PayloadKeyType,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         Box::new(
             self.iter_values()
                 .map(move |value| {
@@ -1056,7 +1071,8 @@ impl PayloadFieldIndex for MapIndex<UuidIntType> {
                         Uuid::from_u128(*value).to_string().into(),
                     ),
                     cardinality: count,
-                }),
+                })
+                .map(Ok),
         )
     }
 }
@@ -1190,7 +1206,7 @@ impl PayloadFieldIndex for MapIndex<IntPayloadType> {
         &self,
         threshold: usize,
         key: PayloadKeyType,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         Box::new(
             self.iter_values()
                 .map(move |value| {
@@ -1204,15 +1220,16 @@ impl PayloadFieldIndex for MapIndex<IntPayloadType> {
                 .map(move |(value, count)| PayloadBlockCondition {
                     condition: FieldCondition::new_match(key.clone(), (*value).into()),
                     cardinality: count,
-                }),
+                })
+                .map(Ok),
         )
     }
 }
 
 impl<N: MapIndexKey + ?Sized> FacetIndex for MapIndex<N>
 where
-    Vec<N::Owned>: Blob + Send + Sync,
-    for<'a> N::Referenced<'a>: Into<FacetValueRef<'a>>,
+    Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
+    for<'a> Cow<'a, N>: Into<FacetValueRef<'a>>,
     for<'a> &'a N: Into<FacetValueRef<'a>>,
 {
     fn get_point_values(
@@ -1222,7 +1239,7 @@ where
         MapIndex::get_values(self, point_id)
             .into_iter()
             .flatten()
-            .map(Into::into)
+            .map(|v| v.into())
     }
 
     fn iter_values(&self) -> impl Iterator<Item = FacetValueRef<'_>> + '_ {
@@ -1237,11 +1254,15 @@ where
             .map(|(k, iter)| (k.into(), iter))
     }
 
-    fn iter_counts_per_value(&self) -> impl Iterator<Item = FacetHit<FacetValueRef<'_>>> + '_ {
-        self.iter_counts_per_value().map(|(value, count)| FacetHit {
-            value: value.into(),
-            count,
-        })
+    fn iter_counts_per_value(
+        &self,
+        deferred_internal_id: Option<PointOffsetType>,
+    ) -> impl Iterator<Item = FacetHit<FacetValueRef<'_>>> + '_ {
+        self.iter_counts_per_value(deferred_internal_id)
+            .map(|(value, count)| FacetHit {
+                value: value.into(),
+                count,
+            })
     }
 }
 
@@ -1363,15 +1384,15 @@ mod tests {
     }
 
     fn save_map_index<N>(
-        data: &[Vec<N::Owned>],
+        data: &[Vec<<N as MapIndexKey>::Owned>],
         path: &Path,
         index_type: IndexType,
-        into_value: impl Fn(&N::Owned) -> Value,
+        into_value: impl Fn(&<N as MapIndexKey>::Owned) -> Value,
     ) where
         N: MapIndexKey + ?Sized,
-        Vec<N::Owned>: Blob + Send + Sync,
+        Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
         MapIndex<N>: PayloadFieldIndex + ValueIndexer,
-        <MapIndex<N> as ValueIndexer>::ValueType: Into<N::Owned>,
+        <MapIndex<N> as ValueIndexer>::ValueType: Into<<N as MapIndexKey>::Owned>,
     {
         let hw_counter = HardwareCounterCell::new();
 
@@ -1421,12 +1442,12 @@ mod tests {
     }
 
     fn load_map_index<N: MapIndexKey + ?Sized>(
-        data: &[Vec<N::Owned>],
+        data: &[Vec<<N as MapIndexKey>::Owned>],
         path: &Path,
         index_type: IndexType,
     ) -> MapIndex<N>
     where
-        Vec<N::Owned>: Blob + Send + Sync,
+        Vec<<N as MapIndexKey>::Owned>: Blob + Send + Sync,
     {
         let index = match index_type {
             #[cfg(feature = "rocksdb")]
@@ -1454,10 +1475,10 @@ mod tests {
             IndexType::RamMmap => MapIndex::<N>::new_mmap(path, false).unwrap().unwrap(),
         };
         for (idx, values) in data.iter().enumerate() {
-            let index_values: HashSet<N::Owned> = index
+            let index_values: HashSet<<N as MapIndexKey>::Owned> = index
                 .get_values(idx as PointOffsetType)
                 .unwrap()
-                .map(|v| N::to_owned(N::from_referenced(&v)))
+                .map(|v| MapIndexKey::to_owned(v.as_ref()))
                 .collect();
             let index_values: HashSet<&N> = index_values.iter().map(|v| v.borrow()).collect();
             let check_values: HashSet<&N> = values.iter().map(|v| v.borrow()).collect();
@@ -1488,7 +1509,7 @@ mod tests {
         let index = builder.finalize().unwrap();
 
         for block in index.payload_blocks(50, PayloadKeyType::new("test_uuid")) {
-            black_box(block);
+            black_box(block.unwrap());
         }
     }
 

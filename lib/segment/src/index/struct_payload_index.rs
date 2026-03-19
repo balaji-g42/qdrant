@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use atomic_refcell::AtomicRefCell;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
+use common::defaults::log_load_timing;
 use common::either_variant::EitherVariant;
 use common::iterator_ext::IteratorExt;
 use common::types::PointOffsetType;
@@ -23,7 +25,7 @@ use super::payload_config::{FullPayloadIndexType, PayloadFieldSchemaWithIndexTyp
 use crate::common::Flusher;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::utils::IndexesMap;
-use crate::id_tracker::IdTrackerSS;
+use crate::id_tracker::{IdTracker, IdTrackerEnum};
 use crate::index::field_index::{
     CardinalityEstimation, FieldIndex, PayloadBlockCondition, PrimaryCondition,
 };
@@ -82,7 +84,7 @@ pub struct StructPayloadIndex {
     /// Payload storage
     pub(super) payload: Arc<AtomicRefCell<PayloadStorageEnum>>,
     /// Used for `has_id` condition and estimating cardinality
-    pub(super) id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    pub(super) id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     /// Vector storages for each field, used for `has_vector` condition
     pub(super) vector_storages: HashMap<VectorNameBuf, Arc<AtomicRefCell<VectorStorageEnum>>>,
     /// Indexes, associated with fields
@@ -156,8 +158,10 @@ impl StructPayloadIndex {
         let mut is_dirty = false;
 
         for (field, payload_schema) in indices.iter_mut() {
+            let started = Instant::now();
             let (field_index, dirty) =
                 self.load_from_db(field, payload_schema, create_if_missing)?;
+            log_load_timing(&self.path, &format!("field `{field}`"), started);
             field_indexes.insert(field.clone(), field_index);
             is_dirty |= dirty;
         }
@@ -301,7 +305,7 @@ impl StructPayloadIndex {
 
     pub fn open(
         payload: Arc<AtomicRefCell<PayloadStorageEnum>>,
-        id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+        id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
         vector_storages: HashMap<VectorNameBuf, Arc<AtomicRefCell<VectorStorageEnum>>>,
         path: &Path,
         is_appendable: bool,
@@ -616,13 +620,15 @@ impl StructPayloadIndex {
     pub fn iter_filtered_points<'a>(
         &'a self,
         filter: &'a Filter,
-        id_tracker: &'a IdTrackerSS,
+        id_tracker: &'a IdTrackerEnum,
         query_cardinality: &'a CardinalityEstimation,
         hw_counter: &'a HardwareCounterCell,
         is_stopped: &'a AtomicBool,
+        deferred_internal_id: Option<PointOffsetType>,
     ) -> impl Iterator<Item = PointOffsetType> + 'a {
         if query_cardinality.primary_clauses.is_empty() {
-            let full_scan_iterator = id_tracker.iter_internal();
+            let full_scan_iterator = id_tracker.iter_internal_visible(deferred_internal_id);
+
             let struct_filtered_context = self.struct_filtered_context(filter, hw_counter);
             // Worst case: query expected to return few matches, but index can't be used
             let matched_points = full_scan_iterator
@@ -647,8 +653,15 @@ impl StructPayloadIndex {
                     .iter_conditions()
                     .all(|condition| query_cardinality.is_primary(condition));
 
-                let joined_primary_iterator =
-                    primary_iterators.into_iter().flatten().stop_if(is_stopped);
+                let joined_primary_iterator = primary_iterators
+                    .into_iter()
+                    // Filter out deferred points.
+                    // This iterator (and each primary iterator too) can yield items in non sorted order, depending on the type of index and primary condition.
+                    .flatten()
+                    .filter(move |&internal_id| {
+                        internal_id < deferred_internal_id.unwrap_or(PointOffsetType::MAX)
+                    })
+                    .stop_if(is_stopped);
 
                 return if all_conditions_are_primary {
                     // All conditions are primary clauses,
@@ -671,7 +684,7 @@ impl StructPayloadIndex {
             // and applying full filter.
             let struct_filtered_context = self.struct_filtered_context(filter, hw_counter);
 
-            let id_tracker_iterator = id_tracker.iter_internal();
+            let id_tracker_iterator = id_tracker.iter_internal_visible(deferred_internal_id);
 
             let iter = id_tracker_iterator
                 .stop_if(is_stopped)
@@ -953,16 +966,18 @@ impl PayloadIndex for StructPayloadIndex {
         filter: &Filter,
         hw_counter: &HardwareCounterCell,
         is_stopped: &AtomicBool,
+        deferred_internal_id: Option<PointOffsetType>,
     ) -> Vec<PointOffsetType> {
         // Assume query is already estimated to be small enough so we can iterate over all matched ids
         let query_cardinality = self.estimate_cardinality(filter, hw_counter);
         let id_tracker = self.id_tracker.borrow();
         self.iter_filtered_points(
             filter,
-            &*id_tracker,
+            &id_tracker,
             &query_cardinality,
             hw_counter,
             is_stopped,
+            deferred_internal_id,
         )
         .collect()
     }
@@ -992,7 +1007,7 @@ impl PayloadIndex for StructPayloadIndex {
         &self,
         field: PayloadKeyTypeRef,
         threshold: usize,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         match self.field_indexes.get(field) {
             None => Box::new(std::iter::empty()),
             Some(indexes) => {
@@ -1245,7 +1260,13 @@ mod tests {
         drop(payload_config);
 
         // Load once and drop.
-        load_segment(&full_segment_path, Uuid::nil(), &AtomicBool::new(false)).unwrap();
+        load_segment(
+            &full_segment_path,
+            Uuid::nil(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         // Check that index type has been written to disk again.
         // Proves we'll always persist the exact index type if it wasn't known yet at that time

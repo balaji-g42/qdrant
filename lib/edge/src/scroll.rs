@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 
 use common::counter::hardware_accumulator::HwMeasurementAcc;
+use common::types::DeferredBehavior;
 use itertools::Itertools as _;
+use rand::RngExt;
 use rand::distr::weighted::WeightedIndex;
 use rand::rngs::StdRng;
-use rand::{Rng as _, SeedableRng as _};
 use segment::common::operation_error::{OperationError, OperationResult};
 use segment::data_types::order_by::{Direction, OrderBy};
 use segment::types::*;
@@ -149,17 +150,10 @@ impl EdgeShard {
                     filter,
                     &AtomicBool::new(false),
                     &hw_counter,
+                    DeferredBehavior::Exclude,
                 )
             })
-            .collect();
-
-        let point_ids = point_ids
-            .into_iter()
-            .flatten()
-            .sorted()
-            .dedup()
-            .take(limit)
-            .collect_vec();
+            .process_results(|iter| iter.flatten().sorted().dedup().take(limit).collect_vec())?;
 
         let mut points = retrieve_blocking(
             self.segments.clone(),
@@ -169,6 +163,7 @@ impl EdgeShard {
             DEFAULT_EDGE_TIMEOUT,
             &AtomicBool::new(false),
             hw_measurement_acc,
+            DeferredBehavior::Exclude,
         )?;
 
         let ordered_points = point_ids
@@ -201,6 +196,7 @@ impl EdgeShard {
                     order_by,
                     &AtomicBool::new(false),
                     &hw_counter,
+                    DeferredBehavior::Exclude,
                 )
             })
             .collect::<Result<_, _>>()?;
@@ -223,6 +219,7 @@ impl EdgeShard {
             DEFAULT_EDGE_TIMEOUT,
             &AtomicBool::new(false),
             hw_measurement_acc,
+            DeferredBehavior::Exclude,
         )?;
 
         let ordered_points = point_ids
@@ -262,11 +259,11 @@ impl EdgeShard {
                     filter,
                     &AtomicBool::new(false),
                     &hw_counter,
-                );
+                )?;
 
-                (point_count, point_ids)
+                OperationResult::Ok((point_count, point_ids))
             })
-            .unzip();
+            .process_results(|iter| iter.unzip())?;
 
         // Shortcut if all segments are empty
         if point_count.iter().all(|&count| count == 0) {
@@ -280,7 +277,7 @@ impl EdgeShard {
             ))
         })?;
 
-        let mut rng = StdRng::from_os_rng();
+        let mut rng = rand::make_rng::<StdRng>();
         let mut random_point_ids = HashSet::with_capacity(limit);
 
         // Randomly sample points in two stages
@@ -327,6 +324,7 @@ impl EdgeShard {
             DEFAULT_EDGE_TIMEOUT,
             &AtomicBool::new(false),
             hw_measurement_acc,
+            DeferredBehavior::Exclude,
         )?
         .into_values()
         .collect();

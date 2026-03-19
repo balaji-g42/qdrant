@@ -11,8 +11,8 @@ use common::save_on_disk::SaveOnDisk;
 use itertools::Itertools;
 use parking_lot::Mutex;
 use segment::common::operation_error::{OperationError, OperationResult};
-use segment::index::hnsw_index::num_rayon_threads;
-use segment::types::QuantizationConfig;
+use shard::operations::optimization::OptimizerThresholds;
+use shard::optimizers::config::SegmentOptimizerConfig;
 use shard::payload_index_schema::PayloadIndexSchema;
 use shard::segment_holder::locked::LockedSegmentHolder;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -24,15 +24,12 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::collection_manager::collection_updater::CollectionUpdater;
-use crate::collection_manager::optimizers::segment_optimizer::{
-    OptimizerThresholds, plan_optimizations,
-};
+use crate::collection_manager::optimizers::segment_optimizer::plan_optimizations;
 use crate::collection_manager::optimizers::{
     Tracker, TrackerLog, TrackerSegmentInfo, TrackerStatus,
 };
 use crate::common::stoppable_task::{StoppableTaskHandle, spawn_stoppable};
-use crate::config::CollectionParams;
-use crate::operations::types::{CollectionError, CollectionResult};
+use crate::operations::types::CollectionResult;
 use crate::shards::update_tracker::UpdateTracker;
 use crate::update_handler::{Optimizer, OptimizerSignal};
 use crate::update_workers::UpdateWorkers;
@@ -62,11 +59,14 @@ impl UpdateWorkers {
         update_tracker: UpdateTracker,
         optimization_finished_sender: watch::Sender<()>,
     ) {
+        let Some(some_optimizer) = optimizers.first() else {
+            debug_assert!(false, "No optimizers configured");
+            log::error!("No optimizers configured, optimization worker will not run");
+            return;
+        };
+
         let max_handles = max_handles.unwrap_or(usize::MAX);
-        let max_indexing_threads = optimizers
-            .first()
-            .map(|optimizer| optimizer.hnsw_config().max_indexing_threads)
-            .unwrap_or_default();
+        let num_indexing_threads = some_optimizer.num_indexing_threads();
 
         // Asynchronous task to trigger optimizers once CPU budget is available again
         let mut resource_available_trigger: Option<JoinHandle<()>> = None;
@@ -110,21 +110,16 @@ impl UpdateWorkers {
 
             // Ensure we have at least one appendable segment with enough capacity
             // Source required parameters from first optimizer
-            if let Some(optimizer) = optimizers.first() {
-                let result = Self::ensure_appendable_segment_with_capacity(
-                    &segments,
-                    optimizer.segments_path(),
-                    &optimizer.collection_params(),
-                    optimizer.quantization_config().as_ref(),
-                    optimizer.threshold_config(),
-                    payload_index_schema.clone(),
-                );
-                if let Err(err) = result {
-                    log::error!(
-                        "Failed to ensure there are appendable segments with capacity: {err}"
-                    );
-                    panic!("Failed to ensure there are appendable segments with capacity: {err}");
-                }
+            let result = Self::ensure_appendable_segment_with_capacity(
+                &segments,
+                some_optimizer.segments_path(),
+                some_optimizer.segment_optimizer_config(),
+                some_optimizer.threshold_config(),
+                payload_index_schema.clone(),
+            );
+            if let Err(err) = result {
+                log::error!("Failed to ensure there are appendable segments with capacity: {err}");
+                panic!("Failed to ensure there are appendable segments with capacity: {err}");
             }
 
             // If not forcing, wait on next signal if we have too many handles
@@ -141,6 +136,7 @@ impl UpdateWorkers {
             .await
             .is_err()
             {
+                let _ = optimization_finished_sender.send(());
                 continue;
             }
 
@@ -148,7 +144,7 @@ impl UpdateWorkers {
             // Otherwise skip now and start a task to trigger the optimizer again once resource
             // budget becomes available
             let desired_cpus = 0;
-            let desired_io = num_rayon_threads(max_indexing_threads);
+            let desired_io = num_indexing_threads;
             if !optimizer_resource_budget.has_budget(desired_cpus, desired_io) {
                 let trigger_active = resource_available_trigger
                     .as_ref()
@@ -163,6 +159,7 @@ impl UpdateWorkers {
                         ),
                     );
                 }
+                let _ = optimization_finished_sender.send(());
                 continue;
             }
 
@@ -320,8 +317,8 @@ impl UpdateWorkers {
 
             // Determine how many Resources we prefer for optimization task, acquire permit for it
             // And use same amount of IO threads as CPUs
-            let max_indexing_threads = optimizer.hnsw_config().max_indexing_threads;
-            let desired_io = num_rayon_threads(max_indexing_threads);
+            let num_indexing_threads = optimizer.num_indexing_threads();
+            let desired_io = num_indexing_threads;
             let Some(mut permit) = optimizer_resource_budget.try_acquire(0, desired_io) else {
                 // If there is no Resource budget, break and return early
                 // If we have no handles (no optimizations) trigger callback so that we wake up
@@ -392,7 +389,7 @@ impl UpdateWorkers {
                         callback();
                     }
                     // Cancelled
-                    Ok(Err(CollectionError::Cancelled { description })) => {
+                    Ok(Err(OperationError::Cancelled { description })) => {
                         is_optimized = false;
                         log::debug!("Optimization cancelled - {description}");
                         status = TrackerStatus::Cancelled(description);
@@ -413,7 +410,7 @@ impl UpdateWorkers {
 
                         is_optimized = false;
                         status = TrackerStatus::Error(status_msg.clone());
-                        reported_error = Some(CollectionError::service_error(status_msg));
+                        reported_error = Some(OperationError::service_error(status_msg));
                         log::warn!(
                             "Optimization task panicked, collection may be in unstable state\
                              {separator}{message}"
@@ -442,8 +439,7 @@ impl UpdateWorkers {
     pub fn ensure_appendable_segment_with_capacity(
         segments: &LockedSegmentHolder,
         segments_path: &Path,
-        collection_params: &CollectionParams,
-        collection_quantization: Option<&QuantizationConfig>,
+        segment_config: &SegmentOptimizerConfig,
         thresholds_config: &OptimizerThresholds,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
     ) -> OperationResult<()> {
@@ -470,15 +466,12 @@ impl UpdateWorkers {
         if no_segment_with_capacity {
             log::debug!("Creating new appendable segment, all existing segments are over capacity");
 
-            let segment_config = collection_params
-                .to_base_segment_config(collection_quantization)
-                .map_err(|err| OperationError::service_error(err.to_string()))?;
-
             let segments_guard = segments.upgradable_read();
             let new_segment = segments_guard.build_tmp_segment(
                 segments_path,
-                Some(segment_config),
+                Some(segment_config.plain_segment_config()),
                 payload_index_schema,
+                thresholds_config.deferred_internal_id,
                 true,
             )?;
             let mut write_guard = parking_lot::RwLockUpgradableReadGuard::upgrade(segments_guard);

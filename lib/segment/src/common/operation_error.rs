@@ -7,6 +7,7 @@ use std::time::Duration;
 use atomicwrites::Error as AtomicIoError;
 use common::fs::FileStorageError;
 use common::mmap::Error as MmapError;
+use common::universal_io::UniversalIoError;
 use gridstore::error::GridstoreError;
 use rayon::ThreadPoolBuildError;
 use thiserror::Error;
@@ -163,6 +164,22 @@ impl From<MmapError> for OperationError {
     }
 }
 
+impl From<UniversalIoError> for OperationError {
+    fn from(err: UniversalIoError) -> Self {
+        match err {
+            UniversalIoError::Io(err) => OperationError::from(err),
+            UniversalIoError::Mmap(err) => OperationError::from(err),
+
+            UniversalIoError::IoUringNotSupported(_)
+            | UniversalIoError::NotFound { .. }
+            | UniversalIoError::OutOfBounds { .. }
+            | UniversalIoError::InvalidFileIndex { .. } => {
+                OperationError::service_error(err.to_string())
+            }
+        }
+    }
+}
+
 impl From<serde_cbor::Error> for OperationError {
     fn from(err: serde_cbor::Error) -> Self {
         OperationError::service_error(format!("Failed to parse data: {err}"))
@@ -251,6 +268,10 @@ impl From<GridstoreError> for OperationError {
                 Self::service_error(err.to_string())
             }
             GridstoreError::ValidationError { message } => Self::validation_error(message),
+            GridstoreError::UniversalIo(err) => {
+                Self::service_error(format!("Gridstore IO error: {err}"))
+            }
+            GridstoreError::PageNotFound { .. } => Self::service_error(err.to_string()),
         }
     }
 }

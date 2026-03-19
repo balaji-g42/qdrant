@@ -3,15 +3,18 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use atomic_refcell::AtomicRefCell;
 use common::budget::ResourcePermit;
+use common::defaults::log_load_timing;
 use common::flags::FeatureFlags;
 use common::fs::{safe_delete_with_suffix, sync_parent_dir};
 use common::is_alive_lock::IsAliveLock;
 use common::mmap::{Advice, AdviceSetting};
 use common::progress_tracker::ProgressTracker;
 use common::storage_version::StorageVersion;
+use common::types::PointOffsetType;
 use fs_err as fs;
 use fs_err::File;
 use log::info;
@@ -28,11 +31,12 @@ use uuid::Uuid;
 use super::rocksdb_builder::RocksDbBuilder;
 use crate::common::operation_error::{OperationError, OperationResult, check_process_stopped};
 use crate::data_types::vectors::DEFAULT_VECTOR_NAME;
+use crate::entry::NonAppendableSegmentEntry;
 use crate::id_tracker::immutable_id_tracker::ImmutableIdTracker;
 use crate::id_tracker::mutable_id_tracker::MutableIdTracker;
 #[cfg(feature = "rocksdb")]
 use crate::id_tracker::simple_id_tracker::SimpleIdTracker;
-use crate::id_tracker::{IdTracker, IdTrackerEnum, IdTrackerSS};
+use crate::id_tracker::{IdTracker, IdTrackerEnum};
 use crate::index::VectorIndexEnum;
 use crate::index::hnsw_index::gpu::gpu_devices_manager::LockedGpuDevice;
 use crate::index::hnsw_index::hnsw::{HNSWIndex, HnswIndexOpenArgs};
@@ -121,21 +125,18 @@ fn open_mmap_vector_storage(
                 vector_storage_path,
                 vector_config.size,
                 vector_config.distance,
-                madvise,
                 populate,
             ),
             VectorStorageDatatype::Uint8 => open_memmap_vector_storage_byte(
                 vector_storage_path,
                 vector_config.size,
                 vector_config.distance,
-                madvise,
                 populate,
             ),
             VectorStorageDatatype::Float16 => open_memmap_vector_storage_half(
                 vector_storage_path,
                 vector_config.size,
                 vector_config.distance,
-                madvise,
                 populate,
             ),
         }
@@ -291,7 +292,7 @@ pub(crate) fn get_payload_index_path(segment_path: &Path) -> PathBuf {
 
 pub(crate) struct VectorIndexOpenArgs<'a> {
     pub path: &'a Path,
-    pub id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    pub id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     pub vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
     pub payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
     pub quantized_vectors: Arc<AtomicRefCell<Option<QuantizedVectors>>>,
@@ -455,11 +456,13 @@ pub(crate) fn create_sparse_vector_storage(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_segment(
     initial_version: Option<SeqNumberType>,
     version: Option<SeqNumberType>,
     segment_path: &Path,
     uuid: Uuid,
+    deferred_internal_id: Option<PointOffsetType>,
     config: &SegmentConfig,
     stopped: &AtomicBool,
     create: bool,
@@ -467,30 +470,34 @@ fn create_segment(
     #[cfg(feature = "rocksdb")]
     let mut db_builder = RocksDbBuilder::new(segment_path, config)?;
 
+    let started = Instant::now();
     let payload_storage = sp(create_payload_storage(
         #[cfg(feature = "rocksdb")]
         &mut db_builder,
         segment_path,
         config,
     )?);
+    log_load_timing(segment_path, "payload_storage", started);
 
     let appendable_flag = config.is_appendable();
 
     let use_mutable_id_tracker =
         appendable_flag || !ImmutableIdTracker::mappings_file_path(segment_path).is_file();
+    let started = Instant::now();
     let id_tracker = create_segment_id_tracker(
         use_mutable_id_tracker,
         segment_path,
         #[cfg(feature = "rocksdb")]
         &mut db_builder,
     )?;
+    log_load_timing(segment_path, "id_tracker", started);
 
     let mut vector_storages = HashMap::new();
 
     for (vector_name, vector_config) in &config.vector_data {
         let vector_storage_path = get_vector_storage_path(segment_path, vector_name);
 
-        // Select suitable vector storage type based on configuration
+        let started = Instant::now();
         let vector_storage = sp(open_vector_storage(
             #[cfg(feature = "rocksdb")]
             &mut db_builder,
@@ -501,6 +508,11 @@ fn create_segment(
             #[cfg(feature = "rocksdb")]
             vector_name,
         )?);
+        log_load_timing(
+            segment_path,
+            &format!("vector_storage dense '{vector_name}'"),
+            started,
+        );
 
         vector_storages.insert(vector_name.to_owned(), vector_storage);
     }
@@ -508,7 +520,7 @@ fn create_segment(
     for (vector_name, sparse_config) in config.sparse_vector_data.iter() {
         let vector_storage_path = get_vector_storage_path(segment_path, vector_name);
 
-        // Select suitable sparse vector storage type based on configuration
+        let started = Instant::now();
         let vector_storage = sp(create_sparse_vector_storage(
             #[cfg(feature = "rocksdb")]
             &mut db_builder,
@@ -519,11 +531,17 @@ fn create_segment(
             #[cfg(feature = "rocksdb")]
             stopped,
         )?);
+        log_load_timing(
+            segment_path,
+            &format!("vector_storage sparse '{vector_name}'"),
+            started,
+        );
 
         vector_storages.insert(vector_name.to_owned(), vector_storage);
     }
 
     let payload_index_path = get_payload_index_path(segment_path);
+    let started = Instant::now();
     let payload_index: Arc<AtomicRefCell<StructPayloadIndex>> = sp(StructPayloadIndex::open(
         payload_storage.clone(),
         id_tracker.clone(),
@@ -532,6 +550,7 @@ fn create_segment(
         appendable_flag,
         create,
     )?);
+    log_load_timing(segment_path, "payload_index", started);
 
     let mut vector_data = HashMap::new();
     for (vector_name, vector_config) in &config.vector_data {
@@ -549,6 +568,7 @@ fn create_segment(
             );
         }
 
+        let started = Instant::now();
         let quantized_vectors = sp(
             if let Some(quantization_config) = config.quantization_config(vector_name) {
                 let quantized_data_path = vector_storage_path;
@@ -562,7 +582,13 @@ fn create_segment(
                 None
             },
         );
+        log_load_timing(
+            segment_path,
+            &format!("quantized_vectors '{vector_name}'"),
+            started,
+        );
 
+        let started = Instant::now();
         let vector_index: Arc<AtomicRefCell<VectorIndexEnum>> = sp(open_vector_index(
             vector_config,
             VectorIndexOpenArgs {
@@ -573,6 +599,11 @@ fn create_segment(
                 quantized_vectors: quantized_vectors.clone(),
             },
         )?);
+        log_load_timing(
+            segment_path,
+            &format!("vector_index dense '{vector_name}'"),
+            started,
+        );
 
         check_process_stopped(stopped)?;
 
@@ -601,6 +632,7 @@ fn create_segment(
             );
         }
 
+        let started = Instant::now();
         let vector_index = sp(create_sparse_vector_index(SparseVectorIndexOpenArgs {
             config: sparse_vector_config.index,
             id_tracker: id_tracker.clone(),
@@ -610,6 +642,11 @@ fn create_segment(
             stopped,
             tick_progress: || (),
         })?);
+        log_load_timing(
+            segment_path,
+            &format!("vector_index sparse '{vector_name}'"),
+            started,
+        );
 
         check_process_stopped(stopped)?;
 
@@ -629,7 +666,7 @@ fn create_segment(
         SegmentType::Plain
     };
 
-    Ok(Segment {
+    let mut segment = Segment {
         uuid,
         initial_version,
         version,
@@ -647,7 +684,13 @@ fn create_segment(
         error_status: None,
         #[cfg(feature = "rocksdb")]
         database: db_builder.build(),
-    })
+        deferred_internal_id: None,
+    };
+
+    if segment.is_appendable() {
+        segment.deferred_internal_id = deferred_internal_id;
+    }
+    Ok(segment)
 }
 
 fn create_segment_id_tracker(
@@ -771,7 +814,14 @@ pub fn normalize_segment_dir(path: &Path) -> OperationResult<Option<(PathBuf, Uu
 /// Preferably, the `uuid` should match the last component of `path`.
 /// In production use [`normalize_segment_dir`] to obtain correct path and UUID.
 /// In tests it is acceptable to pass an arbitrary UUID, e.g., [`Uuid::nil()`].
-pub fn load_segment(path: &Path, uuid: Uuid, stopped: &AtomicBool) -> OperationResult<Segment> {
+pub fn load_segment(
+    path: &Path,
+    uuid: Uuid,
+    deferred_internal_id: Option<PointOffsetType>,
+    stopped: &AtomicBool,
+) -> OperationResult<Segment> {
+    let total_started = Instant::now();
+
     let stored_version = SegmentVersion::load(path)?.ok_or_else(|| {
         OperationError::service_error(format!(
             "Segment version file not found in segment: {}",
@@ -808,8 +858,10 @@ pub fn load_segment(path: &Path, uuid: Uuid, stopped: &AtomicBool) -> OperationR
         SegmentVersion::save(path)?
     }
 
+    let started = Instant::now();
     #[cfg_attr(not(feature = "rocksdb"), expect(unused_mut))]
     let mut segment_state = Segment::load_state(path)?;
+    log_load_timing(path, "load_state", started);
 
     #[cfg_attr(not(feature = "rocksdb"), expect(unused_mut))]
     let mut segment = create_segment(
@@ -817,6 +869,7 @@ pub fn load_segment(path: &Path, uuid: Uuid, stopped: &AtomicBool) -> OperationR
         segment_state.version,
         path,
         uuid,
+        deferred_internal_id,
         &segment_state.config,
         stopped,
         false,
@@ -833,6 +886,8 @@ pub fn load_segment(path: &Path, uuid: Uuid, stopped: &AtomicBool) -> OperationR
             migrate_rocksdb_payload_storage(path, &mut segment, &mut segment_state)?;
         }
     }
+
+    log_load_timing(path, "total", total_started);
 
     Ok(segment)
 }
@@ -852,6 +907,7 @@ pub fn load_segment(path: &Path, uuid: Uuid, stopped: &AtomicBool) -> OperationR
 pub fn build_segment(
     segments_path: &Path,
     config: &SegmentConfig,
+    deferred_internal_id: Option<PointOffsetType>,
     ready: bool,
 ) -> OperationResult<Segment> {
     let uuid = Uuid::new_v4();
@@ -859,7 +915,16 @@ pub fn build_segment(
     let stopped = AtomicBool::new(false);
 
     fs::create_dir_all(&segment_path)?;
-    let segment = create_segment(None, None, &segment_path, uuid, config, &stopped, true)?;
+    let segment = create_segment(
+        None,
+        None,
+        &segment_path,
+        uuid,
+        deferred_internal_id,
+        config,
+        &stopped,
+        true,
+    )?;
     segment.save_current_state()?;
 
     // Version is the last file to save, as it will be used to check if segment was built correctly.

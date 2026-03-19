@@ -14,7 +14,7 @@ use super::field_index::FieldIndex;
 use super::payload_config::PayloadFieldSchemaWithIndexType;
 use crate::common::Flusher;
 use crate::common::operation_error::OperationResult;
-use crate::id_tracker::IdTrackerSS;
+use crate::id_tracker::{IdTracker, IdTrackerEnum};
 use crate::index::field_index::{CardinalityEstimation, PayloadBlockCondition};
 use crate::index::payload_config::PayloadConfig;
 use crate::index::{BuildIndexResult, PayloadIndex};
@@ -28,7 +28,7 @@ use crate::types::{Filter, Payload, PayloadFieldSchema, PayloadKeyType, PayloadK
 /// rather than spend time for index re-building
 pub struct PlainPayloadIndex {
     condition_checker: Arc<ConditionCheckerSS>,
-    id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     config: PayloadConfig,
     path: PathBuf,
 }
@@ -45,7 +45,7 @@ impl PlainPayloadIndex {
 
     pub fn open(
         condition_checker: Arc<ConditionCheckerSS>,
-        id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+        id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
         path: &Path,
     ) -> OperationResult<Self> {
         fs::create_dir_all(path)?;
@@ -166,10 +166,11 @@ impl PayloadIndex for PlainPayloadIndex {
         filter: &Filter,
         hw_counter: &HardwareCounterCell,
         is_stopped: &AtomicBool,
+        deferred_internal_id: Option<PointOffsetType>,
     ) -> Vec<PointOffsetType> {
         let filter_context = self.filter_context(filter, hw_counter);
         let id_tracker = self.id_tracker.borrow();
-        let all_points_iter = id_tracker.iter_internal();
+        let all_points_iter = id_tracker.iter_internal_visible(deferred_internal_id);
         all_points_iter
             .stop_if(is_stopped)
             .filter(|id| filter_context.check(*id))
@@ -195,7 +196,7 @@ impl PayloadIndex for PlainPayloadIndex {
         &self,
         _field: PayloadKeyTypeRef,
         _threshold: usize,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_> {
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_> {
         // No blocks for un-indexed payload
         Box::new(std::iter::empty())
     }

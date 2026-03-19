@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,9 +25,7 @@ use collection::shards::replica_set;
 use collection::shards::replica_set::replica_set_state;
 use collection::shards::resharding::ReshardKey;
 use collection::shards::shard::{PeerId, ShardId, ShardsPlacement};
-use collection::shards::transfer::{
-    ShardTransfer, ShardTransferKey, ShardTransferMethod, ShardTransferRestart,
-};
+use collection::shards::transfer::{ShardTransfer, ShardTransferKey, ShardTransferRestart};
 use itertools::Itertools;
 use rand::prelude::SliceRandom;
 use rand::seq::IteratorRandom;
@@ -411,6 +410,16 @@ pub async fn do_update_collection_cluster(
             validate_peer_exists(to_peer_id)?;
             validate_peer_exists(from_peer_id)?;
 
+            // Decide on a transfer-method and check its validity in combination with filters.
+            let method = collection.default_shard_transfer_method().await;
+            if !method.is_streaming() && filter.is_some() {
+                return Err(StorageError::BadRequest {
+                    description: format!(
+                        "Can't do shard transfer using method {method:?} in combination with a filter",
+                    ),
+                });
+            }
+
             // submit operation to consensus
             dispatcher
                 .submit_collection_meta_op(
@@ -422,7 +431,7 @@ pub async fn do_update_collection_cluster(
                             from: from_peer_id,
                             to: to_peer_id,
                             sync: true,
-                            method: Some(ShardTransferMethod::StreamRecords),
+                            method: Some(method),
                             filter,
                         }),
                     ),
@@ -514,10 +523,20 @@ pub async fn do_update_collection_cluster(
                 .shards_number
                 .unwrap_or(state.config.params.shard_number)
                 .get() as usize;
+
+            let default_replication_factor = if create_sharding_key.initial_state.is_some() {
+                // When initial_state is set (e.g. Partial), create a single replica per shard.
+                // Data must be transferred into the shard first before it can be replicated.
+                1
+            } else {
+                state.config.params.replication_factor.get()
+            };
+
             let replication_factor = create_sharding_key
                 .replication_factor
-                .unwrap_or(state.config.params.replication_factor)
-                .get() as usize;
+                .map(NonZeroU32::get)
+                .unwrap_or(default_replication_factor)
+                as usize;
 
             if let Some(initial_state) = create_sharding_key.initial_state {
                 match initial_state {

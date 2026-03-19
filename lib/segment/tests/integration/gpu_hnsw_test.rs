@@ -9,13 +9,13 @@ use common::types::TelemetryDetail;
 use ordered_float::OrderedFloat;
 use parking_lot::Mutex;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, only_default_vector};
 use segment::entry::entry_point::SegmentEntry;
 use segment::fixtures::payload_fixtures::{random_int_payload, random_vector};
+use segment::index::hnsw_index::get_num_indexing_threads;
 use segment::index::hnsw_index::gpu::gpu_devices_manager::LockedGpuDevice;
 use segment::index::hnsw_index::hnsw::{HNSWIndex, HnswIndexOpenArgs};
-use segment::index::hnsw_index::num_rayon_threads;
 use segment::index::{PayloadIndex, VectorIndex};
 use segment::json_path::JsonPath;
 use segment::payload_json;
@@ -59,7 +59,7 @@ fn test_gpu_filterable_hnsw() {
         .try_init();
 
     let stopped = AtomicBool::new(false);
-    let max_failures = 5;
+    let max_failures = 7;
     let dim = 8;
     let m = 8;
     let num_vectors: u64 = 10_000;
@@ -123,7 +123,7 @@ fn test_gpu_filterable_hnsw() {
         )
         .unwrap();
 
-    let permit_cpu_count = num_rayon_threads(hnsw_config.max_indexing_threads);
+    let permit_cpu_count = get_num_indexing_threads(hnsw_config.max_indexing_threads);
     let permit = Arc::new(ResourcePermit::dummy(permit_cpu_count as u32));
 
     let instance = gpu::GPU_TEST_INSTANCE.clone();

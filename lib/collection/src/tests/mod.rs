@@ -1,3 +1,5 @@
+mod deferred_points_dedup;
+mod deferred_points_tests;
 mod fix_payload_indices;
 pub mod fixtures;
 mod hw_metrics;
@@ -21,10 +23,11 @@ use common::save_on_disk::SaveOnDisk;
 use futures::future::join_all;
 use itertools::Itertools;
 use parking_lot::Mutex;
-use rand::Rng;
+use rand::RngExt;
 use segment::data_types::vectors::only_default_vector;
-use segment::index::hnsw_index::num_rayon_threads;
+use segment::index::hnsw_index::get_num_indexing_threads;
 use segment::types::{Distance, PointIdType};
+use shard::operations::optimization::OptimizerThresholds;
 use shard::segment_holder::locked::LockedSegmentHolder;
 use tempfile::Builder;
 use tokio::time::{Instant, sleep};
@@ -36,10 +39,10 @@ use crate::collection_manager::fixtures::{
 };
 use crate::collection_manager::holders::segment_holder::{LockedSegment, SegmentHolder, SegmentId};
 use crate::collection_manager::optimizers::TrackerStatus;
-use crate::collection_manager::optimizers::segment_optimizer::OptimizerThresholds;
 use crate::config::CollectionParams;
 use crate::operations::types::VectorsConfig;
 use crate::operations::vector_params_builder::VectorParamsBuilder;
+use crate::optimizers_builder::build_segment_optimizer_config;
 use crate::update_handler::Optimizer;
 use crate::update_workers::UpdateWorkers;
 
@@ -92,7 +95,7 @@ async fn test_optimization_process() {
     // We skip optimizations that use less than half of the preferred CPU budget
     let expected_optimization_count = {
         let cpus = common::cpu::get_cpu_budget(0);
-        let hnsw_threads = num_rayon_threads(0);
+        let hnsw_threads = get_num_indexing_threads(0);
         (cpus / hnsw_threads + usize::from((cpus % hnsw_threads) >= hnsw_threads.div_ceil(2)))
             .clamp(1, total_optimizations)
     };
@@ -205,7 +208,7 @@ async fn test_cancel_optimization() {
         // We skip optimizations that use less than half of the preferred CPU budget
         let expected_optimization_count = {
             let cpus = common::cpu::get_cpu_budget(0);
-            let hnsw_threads = num_rayon_threads(0);
+            let hnsw_threads = get_num_indexing_threads(0);
             (cpus / hnsw_threads + usize::from((cpus % hnsw_threads) >= hnsw_threads.div_ceil(2)))
                 .clamp(1, 3)
         };
@@ -241,7 +244,11 @@ async fn test_new_segment_when_all_over_capacity() {
         max_segment_size_kb: 1,
         memmap_threshold_kb: 1_000_000,
         indexing_threshold_kb: 1_000_000,
+        deferred_internal_id: None,
     };
+    let hnsw_config = Default::default();
+    let segment_config =
+        build_segment_optimizer_config(&collection_params, &hnsw_config, &Default::default());
 
     let payload_schema_file = dir.path().join("payload.schema");
     let payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>> =
@@ -264,8 +271,7 @@ async fn test_new_segment_when_all_over_capacity() {
     UpdateWorkers::ensure_appendable_segment_with_capacity(
         &segments,
         dir.path(),
-        &collection_params,
-        None,
+        &segment_config,
         &optimizer_thresholds,
         payload_index_schema.clone(),
     )
@@ -276,8 +282,7 @@ async fn test_new_segment_when_all_over_capacity() {
     UpdateWorkers::ensure_appendable_segment_with_capacity(
         &segments,
         dir.path(),
-        &collection_params,
-        None,
+        &segment_config,
         &optimizer_thresholds,
         payload_index_schema.clone(),
     )
@@ -322,8 +327,7 @@ async fn test_new_segment_when_all_over_capacity() {
     UpdateWorkers::ensure_appendable_segment_with_capacity(
         &segments,
         dir.path(),
-        &collection_params,
-        None,
+        &segment_config,
         &optimizer_thresholds,
         payload_index_schema,
     )

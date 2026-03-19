@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use atomic_refcell::AtomicRefCell;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
-use segment::fixtures::payload_context_fixture::FixtureIdTracker;
+use segment::fixtures::payload_context_fixture::create_id_tracker_fixture;
 use segment::index::PayloadIndex;
 use segment::index::struct_payload_index::StructPayloadIndex;
 use segment::json_path::JsonPath;
@@ -71,7 +71,7 @@ fn test_filtering_context_consistency() {
     }
 
     let wrapped_payload_storage = Arc::new(AtomicRefCell::new(payload_storage.into()));
-    let id_tracker = Arc::new(AtomicRefCell::new(FixtureIdTracker::new(NUM_POINTS)));
+    let id_tracker = Arc::new(AtomicRefCell::new(create_id_tracker_fixture(NUM_POINTS)));
 
     let mut index = StructPayloadIndex::open(
         wrapped_payload_storage,
@@ -144,7 +144,7 @@ fn test_filtering_context_consistency() {
         );
 
         let nested_filter_0 = Filter::new_must(nested_condition_0);
-        let res0 = index.query_points(&nested_filter_0, &hw_counter, &is_stopped);
+        let res0 = index.query_points(&nested_filter_0, &hw_counter, &is_stopped, None);
 
         let filter_context = index.filter_context(&nested_filter_0, &hw_counter);
 
@@ -182,7 +182,7 @@ fn test_filtering_context_consistency() {
 
         let nested_filter_1 = Filter::new_must(nested_condition_1);
 
-        let res1 = index.query_points(&nested_filter_1, &hw_counter, &is_stopped);
+        let res1 = index.query_points(&nested_filter_1, &hw_counter, &is_stopped, None);
 
         let filter_context = index.filter_context(&nested_filter_1, &hw_counter);
 
@@ -217,7 +217,7 @@ fn test_filtering_context_consistency() {
 
         let nested_filter_2 = Filter::new_must(nested_condition_2);
 
-        let res2 = index.query_points(&nested_filter_2, &hw_counter, &is_stopped);
+        let res2 = index.query_points(&nested_filter_2, &hw_counter, &is_stopped, None);
 
         let filter_context = index.filter_context(&nested_filter_2, &hw_counter);
 
@@ -262,7 +262,7 @@ fn test_filtering_context_consistency() {
             must_not: None,
         };
 
-        let res3 = index.query_points(&nested_filter_3, &hw_counter, &is_stopped);
+        let res3 = index.query_points(&nested_filter_3, &hw_counter, &is_stopped, None);
 
         let filter_context = index.filter_context(&nested_filter_3, &hw_counter);
 

@@ -10,8 +10,8 @@ use common::types::PointOffsetType;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ordered_float::OrderedFloat;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
-use segment::fixtures::payload_context_fixture::FixtureIdTracker;
+use rand::{Rng, RngExt, SeedableRng};
+use segment::fixtures::payload_context_fixture::create_id_tracker_fixture;
 use segment::fixtures::payload_fixtures::{FLT_KEY, INT_KEY};
 use segment::index::PayloadIndex;
 use segment::index::struct_payload_index::StructPayloadIndex;
@@ -63,7 +63,7 @@ fn range_filtering(c: &mut Criterion) {
     }
 
     let payload_storage = Arc::new(AtomicRefCell::new(payload_storage.into()));
-    let id_tracker = Arc::new(AtomicRefCell::new(FixtureIdTracker::new(NUM_POINTS)));
+    let id_tracker = Arc::new(AtomicRefCell::new(create_id_tracker_fixture(NUM_POINTS)));
 
     let mut index = StructPayloadIndex::open(
         payload_storage.clone(),
@@ -104,7 +104,9 @@ fn range_filtering(c: &mut Criterion) {
         b.iter_batched(
             || random_range_filter(&mut rng, FLT_KEY),
             |filter| {
-                result_size += index.query_points(&filter, &hw_counter, &is_stopped).len();
+                result_size += index
+                    .query_points(&filter, &hw_counter, &is_stopped, None)
+                    .len();
                 query_count += 1;
             },
             BatchSize::SmallInput,
@@ -115,7 +117,9 @@ fn range_filtering(c: &mut Criterion) {
         b.iter_batched(
             || random_range_filter(&mut rng, INT_KEY),
             |filter| {
-                result_size += index.query_points(&filter, &hw_counter, &is_stopped).len();
+                result_size += index
+                    .query_points(&filter, &hw_counter, &is_stopped, None)
+                    .len();
                 query_count += 1;
             },
             BatchSize::SmallInput,
@@ -141,7 +145,9 @@ fn range_filtering(c: &mut Criterion) {
         b.iter_batched(
             || random_range_filter(&mut rng, FLT_KEY),
             |filter| {
-                result_size += index.query_points(&filter, &hw_counter, &is_stopped).len();
+                result_size += index
+                    .query_points(&filter, &hw_counter, &is_stopped, None)
+                    .len();
                 query_count += 1;
             },
             BatchSize::SmallInput,
@@ -152,7 +158,9 @@ fn range_filtering(c: &mut Criterion) {
         b.iter_batched(
             || random_range_filter(&mut rng, INT_KEY),
             |filter| {
-                result_size += index.query_points(&filter, &hw_counter, &is_stopped).len();
+                result_size += index
+                    .query_points(&filter, &hw_counter, &is_stopped, None)
+                    .len();
                 query_count += 1;
             },
             BatchSize::SmallInput,

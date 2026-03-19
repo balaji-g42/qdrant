@@ -6,12 +6,12 @@ use actix_web::body::EitherBody;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready};
 use actix_web::{Error, FromRequest, HttpMessage, HttpResponse, ResponseError};
 use futures_util::future::LocalBoxFuture;
-use storage::audit::audit_trust_forwarded_headers;
+use storage::audit::{audit_trust_forwarded_headers, extract_tracing_id};
 use storage::rbac::Access;
 
 use super::forwarded;
 use super::helpers::HttpError;
-use crate::common::auth::{Auth, AuthError, AuthKeys, AuthType};
+use crate::common::auth::{Auth, AuthError, AuthKeys, AuthType, log_denied_auth};
 
 /// Actix middleware factory that validates API keys / JWTs and inserts an
 /// [`Auth`] object into request extensions.
@@ -121,18 +121,26 @@ where
         let auth_keys = self.auth_keys.clone();
         let service = self.service.clone();
         Box::pin(async move {
+            let remote = if audit_trust_forwarded_headers() {
+                forwarded::forwarded_for(&req)
+            } else {
+                None
+            }
+            .or_else(|| req.peer_addr().map(|a| a.ip().to_string()));
+
+            let tracing_id = extract_tracing_id(|h| {
+                req.headers()
+                    .get(h)
+                    .and_then(|val| val.to_str().ok())
+                    .map(str::to_string)
+            });
+
             match auth_keys
                 .validate_request(|key| req.headers().get(key).and_then(|val| val.to_str().ok()))
                 .await
             {
                 Ok((access, inference_token, auth_type, subject)) => {
-                    let remote = if audit_trust_forwarded_headers() {
-                        forwarded::forwarded_for(&req)
-                    } else {
-                        None
-                    }
-                    .or_else(|| req.peer_addr().map(|a| a.ip().to_string()));
-                    let auth = Auth::new(access, subject, remote, auth_type);
+                    let auth = Auth::new(access, subject, remote, auth_type, tracing_id);
                     let previous = req.extensions_mut().insert(auth);
                     req.extensions_mut().insert(inference_token);
                     debug_assert!(
@@ -142,6 +150,7 @@ where
                     service.call(req).await
                 }
                 Err(e) => {
+                    log_denied_auth(req.path(), remote.clone(), tracing_id, &e);
                     let resp = match e {
                         AuthError::Unauthorized(e) => HttpResponse::Unauthorized().body(e),
                         AuthError::Forbidden(e) => HttpResponse::Forbidden().body(e),
@@ -174,6 +183,12 @@ impl FromRequest for ActixAuth {
                 None
             }
             .or_else(|| req.peer_addr().map(|a| a.ip().to_string()));
+            let tracing_id = extract_tracing_id(|h| {
+                req.headers()
+                    .get(h)
+                    .and_then(|val| val.to_str().ok())
+                    .map(str::to_string)
+            });
             Auth::new(
                 Access::full(
                     "All requests have full by default access when API key is not configured",
@@ -181,6 +196,7 @@ impl FromRequest for ActixAuth {
                 None,
                 remote,
                 AuthType::None,
+                tracing_id,
             )
         });
         ready(Ok(ActixAuth(auth)))

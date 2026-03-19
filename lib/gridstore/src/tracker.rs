@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use ahash::{AHashMap, AHashSet};
-use common::mmap::{Advice, AdviceSetting, Madviseable};
+use common::mmap::{Advice, AdviceSetting, create_and_ensure_length};
 #[expect(deprecated, reason = "legacy code")]
-use common::mmap::{create_and_ensure_length, open_write_mmap, transmute_from_u8, transmute_to_u8};
-use memmap2::MmapMut;
+use common::mmap::{transmute_from_u8, transmute_to_u8};
+use common::universal_io::{
+    ElementsRange, OpenOptions, UniversalIoError, UniversalRead, UniversalWrite,
+};
 use smallvec::SmallVec;
 use zerocopy::FromZeros;
 
@@ -15,7 +17,15 @@ pub type PointOffset = u32;
 pub type BlockOffset = u32;
 pub type PageId = u32;
 
-const TRACKER_MEM_ADVICE: Advice = Advice::Random;
+/// OpenOptions for the tracker file (random access, no populate).
+fn tracker_open_options() -> OpenOptions {
+    OpenOptions {
+        need_sequential: false,
+        disk_parallel: None,
+        populate: Some(false),
+        advice: Some(AdviceSetting::Advice(Advice::Random)),
+    }
+}
 
 /// A type similar to [`std::option::Option`], but with stable layout. It is intended to be compatible with older
 /// gridstore files, but it is well-defined, unlike [`std::option::Option`].
@@ -108,7 +118,7 @@ impl ValuePointer {
 /// the now persisted changes from these pointer updates. With this mechanism we write each update to
 /// disk exactly once.
 #[derive(Debug, Default, Clone, PartialEq)]
-pub(super) struct PointerUpdates {
+pub(crate) struct PointerUpdates {
     /// Pointer to write in tracker when persisting
     current: Option<ValuePointer>,
     /// List of pointers to free in bitmask when persisting
@@ -214,89 +224,230 @@ impl PointerUpdates {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
 struct TrackerHeader {
     next_pointer_offset: u32,
 }
 
 #[derive(Debug)]
-pub struct Tracker {
+pub struct Tracker<S> {
     /// Path to the file
     path: PathBuf,
     /// Header of the file
     header: TrackerHeader,
-    /// Mmap of the file
-    mmap: MmapMut,
+    /// Storage for the file (universal io backend)
+    storage: S,
     /// Updates that haven't been flushed
     ///
-    /// When flushing, these updates get written into the mmap and flushed at once.
+    /// When flushing, these updates get written into the storage and flushed at once.
     pub(super) pending_updates: AHashMap<PointOffset, PointerUpdates>,
 
     /// The maximum pointer offset in the tracker (updated in memory).
     next_pointer_offset: PointOffset,
 }
 
-impl Tracker {
+// Methods that do not use storage (no trait bound).
+impl<S> Tracker<S> {
     const FILE_NAME: &'static str = "tracker.dat";
-    const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
-
-    pub fn files(&self) -> Vec<PathBuf> {
-        vec![self.path.clone()]
-    }
 
     fn tracker_file_name(path: &Path) -> PathBuf {
         path.join(Self::FILE_NAME)
     }
 
+    pub fn files(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
+
+    pub fn pointer_count(&self) -> u32 {
+        self.next_pointer_offset
+    }
+}
+
+// Read operations -- only require UniversalRead
+impl<S: UniversalRead<u8>> Tracker<S> {
+    /// Open an existing PageTracker at the given path
+    /// If the file does not exist, return an error
+    pub fn open(path: &Path) -> Result<Self> {
+        let path = Self::tracker_file_name(path);
+        let storage = Self::open_storage(&path)?;
+        let header: TrackerHeader = Self::read_header(&storage)?;
+        let pending_updates = AHashMap::new();
+        Ok(Self {
+            next_pointer_offset: header.next_pointer_offset,
+            path,
+            header,
+            storage,
+            pending_updates,
+        })
+    }
+
+    fn read_header(storage: &S) -> Result<TrackerHeader> {
+        let header_bytes = storage.read::<false>(ElementsRange {
+            start: 0,
+            length: std::mem::size_of::<TrackerHeader>() as u64,
+        })?;
+        #[expect(deprecated, reason = "legacy code")]
+        Ok(*unsafe { transmute_from_u8::<TrackerHeader>(header_bytes.as_ref()) })
+    }
+
+    fn open_storage(path: &Path) -> Result<S> {
+        let storage = match S::open(path, tracker_open_options()) {
+            Err(UniversalIoError::NotFound { .. }) => {
+                return Err(GridstoreError::service_error(format!(
+                    "Tracker file does not exist: {}",
+                    path.display()
+                )));
+            }
+            other => other?,
+        };
+        Ok(storage)
+    }
+
+    /// This method reloads the tracker storage from "disk", so that
+    /// it should make newly written data visible to the tracker.
+    ///
+    /// Important assumptions:
+    ///
+    /// - Should only be called on read-only instances of the tracker.
+    /// - Only appending new pointers is supported, not modifications of existing pointers.
+    /// - Partial writes are possible, but ignored. Header is a source of truth.
+    ///
+    /// Returns `true` if there are new changes, `false` if the tracker is already up to date.
+    pub fn live_reload(&mut self) -> Result<bool> {
+        let new_header = Self::read_header(&self.storage)?;
+
+        if new_header.next_pointer_offset < self.next_pointer_offset {
+            Err(GridstoreError::service_error(format!(
+                "live reload cannot decrease pointer count, possible data loss: old count {:#?}, new count {:#?}",
+                self.next_pointer_offset, new_header.next_pointer_offset
+            )))
+        } else if new_header.next_pointer_offset == self.next_pointer_offset {
+            // No new pointers, no need to reload
+            Ok(false)
+        } else {
+            // reopen storage to make new data visible
+            // For some storages it should be a no-op.
+            self.storage = Self::open_storage(&self.path)?;
+
+            // Update in-memory state to reflect new pointers
+            self.header = new_header;
+            self.next_pointer_offset = new_header.next_pointer_offset;
+            Ok(true)
+        }
+    }
+
+    /// Get the raw value at the given point offset
+    fn get_raw(&self, point_offset: PointOffset) -> Result<Option<Option<ValuePointer>>> {
+        let start_offset = std::mem::size_of::<TrackerHeader>()
+            + point_offset as usize * std::mem::size_of::<Optional<ValuePointer>>();
+        let end_offset = start_offset + std::mem::size_of::<Optional<ValuePointer>>();
+        let storage_len = self.storage.len()?;
+        if end_offset as u64 > storage_len {
+            return Ok(None);
+        }
+        let bytes = self.storage.read::<false>(ElementsRange {
+            start: start_offset as u64,
+            length: std::mem::size_of::<Optional<ValuePointer>>() as u64,
+        })?;
+        #[expect(deprecated, reason = "legacy code")]
+        let opt: &Optional<ValuePointer> = unsafe { transmute_from_u8(bytes.as_ref()) };
+        Ok(Some(opt.is_some().copied()))
+    }
+
+    /// Get the page pointer at the given point offset
+    pub fn get(&self, point_offset: PointOffset) -> Result<Option<ValuePointer>> {
+        match self.pending_updates.get(&point_offset) {
+            // Pending update exists but is empty, should not happen, fall back to real data
+            Some(pending) if pending.is_empty() => {
+                debug_assert!(false, "pending updates must not be empty");
+                Ok(self.get_raw(point_offset)?.and_then(|o| o))
+            }
+            // Use set from pending updates
+            Some(pending) => Ok(pending.current),
+            // No pending update, use real data
+            None => Ok(self.get_raw(point_offset)?.and_then(|o| o)),
+        }
+    }
+
+    /// Iterate over the pointers in the tracker
+    /// Starts from the given point offset
+    pub fn iter_pointers(
+        &self,
+        from: PointOffset,
+        max: PointOffset,
+    ) -> impl Iterator<Item = (PointOffset, Result<Option<ValuePointer>>)> + '_ {
+        let to = self.next_pointer_offset.min(max.saturating_add(1));
+        (from..to).map(move |i| (i, self.get(i)))
+    }
+
+    pub fn has_pointer(&self, point_offset: PointOffset) -> Result<bool> {
+        Ok(self.get(point_offset)?.is_some())
+    }
+
+    pub fn populate(&self) -> Result<()> {
+        self.storage.populate().map_err(Into::into)
+    }
+
+    /// Get the length of the mapping
+    /// Excludes None values
+    /// Warning: performs a full scan of the tracker.
+    #[cfg(test)]
+    #[allow(clippy::unnecessary_wraps)]
+    pub fn mapping_len(&self) -> Result<usize> {
+        let mut count = 0;
+        for i in 0..self.next_pointer_offset {
+            if self.get(i).ok().flatten().is_some() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.mapping_len().unwrap_or(0) == 0
+    }
+
+    /// Return the size of the underlying file
+    #[cfg(test)]
+    pub fn mmap_file_size(&self) -> Result<usize> {
+        self.storage.len().map(|u| u as usize).map_err(Into::into)
+    }
+}
+
+// Write operations and constructors -- require UniversalWrite
+impl<S> Tracker<S>
+where
+    S: UniversalRead<u8> + UniversalWrite<u8>,
+{
+    const DEFAULT_SIZE: usize = 1024 * 1024; // 1MB
+
     /// Create a new PageTracker at the given dir path
     /// The file is created with the default size if no size hint is given
-    pub fn new(path: &Path, size_hint: Option<usize>) -> Self {
+    pub fn new(path: &Path, size_hint: Option<usize>) -> Result<Self> {
         let path = Self::tracker_file_name(path);
         let size = size_hint.unwrap_or(Self::DEFAULT_SIZE).next_power_of_two();
-        assert!(size > size_of::<TrackerHeader>(), "Size hint is too small");
-        create_and_ensure_length(&path, size).expect("Failed to create page tracker file");
-        let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)
-            .expect("Failed to open page tracker mmap");
+        assert!(
+            size > std::mem::size_of::<TrackerHeader>(),
+            "Size hint is too small"
+        );
+        create_and_ensure_length(&path, size)?;
+        let storage = S::open(&path, tracker_open_options())?;
         let header = TrackerHeader::default();
         let pending_updates = AHashMap::new();
         let mut page_tracker = Self {
             path,
             header,
-            mmap,
+            storage,
             pending_updates,
             next_pointer_offset: 0,
         };
-        page_tracker.write_header();
-        page_tracker
+        page_tracker.write_header()?;
+        Ok(page_tracker)
     }
 
-    /// Open an existing PageTracker at the given path
-    /// If the file does not exist, return None
-    pub fn open(path: &Path) -> Result<Self> {
-        let path = Self::tracker_file_name(path);
-        if !path.exists() {
-            return Err(GridstoreError::service_error(format!(
-                "Tracker file does not exist: {}",
-                path.display()
-            )));
-        }
-        let mmap = open_write_mmap(&path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)?;
-        #[expect(deprecated, reason = "legacy code")]
-        let header: &TrackerHeader =
-            // TODO SAFETY
-            unsafe { transmute_from_u8(&mmap[0..size_of::<TrackerHeader>()]) };
-        let pending_updates = AHashMap::new();
-        Ok(Self {
-            next_pointer_offset: header.next_pointer_offset,
-            path,
-            header: header.clone(),
-            mmap,
-            pending_updates,
-        })
-    }
-
-    /// Writes the accumulated pending updates to mmap and flushes it
+    /// Writes the accumulated pending updates to storage and flushes it
     ///
     /// Changes should be captured from [`self.pending_updates`]. This method may therefore flush
     /// an earlier version of changes.
@@ -309,7 +460,7 @@ impl Tracker {
     pub fn write_pending(
         &mut self,
         pending_updates: AHashMap<PointOffset, PointerUpdates>,
-    ) -> Vec<ValuePointer> {
+    ) -> Result<Vec<ValuePointer>> {
         let mut old_pointers = Vec::new();
 
         for (point_offset, updates) in pending_updates {
@@ -317,14 +468,14 @@ impl Tracker {
                 // Write to store a new pointer
                 Some(new_pointer) => {
                     // Mark any existing pointer for removal to free its blocks
-                    if let Some(Some(old_pointer)) = self.get_raw(point_offset) {
-                        old_pointers.push(*old_pointer);
+                    if let Some(Some(old_pointer)) = self.get_raw(point_offset)? {
+                        old_pointers.push(old_pointer);
                     }
 
-                    self.persist_pointer(point_offset, Some(new_pointer));
+                    self.persist_pointer(point_offset, Some(new_pointer))?;
                 }
                 // Write to empty the pointer
-                None => self.persist_pointer(point_offset, None),
+                None => self.persist_pointer(point_offset, None)?,
             }
 
             // Mark all old pointers for removal to free its blocks
@@ -346,130 +497,68 @@ impl Tracker {
         }
 
         // Increment header count if necessary
-        self.write_pointer_count();
+        self.write_pointer_count()?;
 
-        old_pointers
+        Ok(old_pointers)
     }
 
-    pub fn flush(&self) -> std::io::Result<()> {
-        self.mmap.flush()
+    pub fn flusher(&self) -> crate::gridstore::Flusher {
+        let inner = self.storage.flusher();
+        Box::new(move || inner().map_err(Into::into))
     }
 
     #[cfg(test)]
-    pub fn write_pending_and_flush_internal(&mut self) -> std::io::Result<Vec<ValuePointer>> {
+    pub fn write_pending_and_flush_internal(&mut self) -> Result<Vec<ValuePointer>> {
         let pending_updates = std::mem::take(&mut self.pending_updates);
-        let res = self.write_pending(pending_updates);
-        self.flush()?;
+        let res = self.write_pending(pending_updates)?;
+        self.storage.flusher()()?;
         Ok(res)
     }
 
-    /// Return the size of the underlying mmapped file
-    #[cfg(test)]
-    pub fn mmap_file_size(&self) -> usize {
-        self.mmap.len()
-    }
-
-    pub fn pointer_count(&self) -> u32 {
-        self.next_pointer_offset
-    }
-
-    /// Write the current page header to the memory map
-    fn write_header(&mut self) {
-        // Safety: TrackerHeader is a POD type.
+    /// Write the current page header to the storage
+    fn write_header(&mut self) -> Result<()> {
         #[expect(deprecated, reason = "legacy code")]
         let header_bytes = unsafe { transmute_to_u8(&self.header) };
-        self.mmap[0..header_bytes.len()].copy_from_slice(header_bytes);
+        self.storage.write(0, header_bytes)?;
+        Ok(())
     }
 
     /// Save the mapping at the given offset
     /// The file is resized if necessary
-    fn persist_pointer(&mut self, point_offset: PointOffset, pointer: Option<ValuePointer>) {
-        if pointer.is_none() && point_offset as usize >= self.mmap.len() {
-            return;
+    fn persist_pointer(
+        &mut self,
+        point_offset: PointOffset,
+        pointer: Option<ValuePointer>,
+    ) -> Result<()> {
+        let storage_len = self.storage.len()? as usize;
+        if pointer.is_none() && point_offset as usize >= storage_len {
+            return Ok(());
         }
 
         let point_offset = point_offset as usize;
-        let start_offset =
-            size_of::<TrackerHeader>() + point_offset * size_of::<Optional<ValuePointer>>();
-        let end_offset = start_offset + size_of::<Optional<ValuePointer>>();
+        let start_offset = std::mem::size_of::<TrackerHeader>()
+            + point_offset * std::mem::size_of::<Optional<ValuePointer>>();
+        let end_offset = start_offset + std::mem::size_of::<Optional<ValuePointer>>();
 
         // Grow tracker file if it isn't big enough
-        if self.mmap.len() < end_offset {
-            self.mmap.flush().unwrap();
+        if storage_len < end_offset {
+            self.storage.flusher()()?;
             let new_size = end_offset.next_power_of_two();
-            create_and_ensure_length(&self.path, new_size).unwrap();
-            self.mmap = open_write_mmap(&self.path, AdviceSetting::from(TRACKER_MEM_ADVICE), false)
-                .unwrap();
+            create_and_ensure_length(&self.path, new_size)?;
+            self.storage = S::open(&self.path, tracker_open_options())?;
         }
 
         let pointer: Optional<_> = pointer.into();
-        // Safety: Optional<ValuePointer> is a POD type.
         #[expect(deprecated, reason = "legacy code")]
-        self.mmap[start_offset..end_offset].copy_from_slice(unsafe { transmute_to_u8(&pointer) });
-    }
-
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.mapping_len() == 0
-    }
-
-    /// Get the length of the mapping
-    /// Excludes None values
-    /// Warning: performs a full scan of the tracker.
-    #[cfg(test)]
-    pub fn mapping_len(&self) -> usize {
-        (0..self.next_pointer_offset)
-            .filter(|i| self.get(*i).is_some())
-            .count()
-    }
-
-    /// Iterate over the pointers in the tracker
-    /// Starts from the given point offset
-    pub fn iter_pointers(
-        &self,
-        from: PointOffset,
-    ) -> impl Iterator<Item = (PointOffset, Option<ValuePointer>)> + '_ {
-        (from..self.next_pointer_offset).map(move |i| (i, self.get(i as PointOffset)))
-    }
-
-    /// Get the raw value at the given point offset
-    fn get_raw(&self, point_offset: PointOffset) -> Option<Option<&ValuePointer>> {
-        let start_offset = size_of::<TrackerHeader>()
-            + point_offset as usize * size_of::<Optional<ValuePointer>>();
-        let end_offset = start_offset + size_of::<Optional<ValuePointer>>();
-        if end_offset > self.mmap.len() {
-            return None;
-        }
-        // Safety: Optional<ValuePointer> is a POD type.
-        #[expect(deprecated, reason = "legacy code")]
-        let page_pointer: &Optional<_> =
-            unsafe { transmute_from_u8(&self.mmap[start_offset..end_offset]) };
-        Some(page_pointer.is_some())
-    }
-
-    /// Get the page pointer at the given point offset
-    pub fn get(&self, point_offset: PointOffset) -> Option<ValuePointer> {
-        match self.pending_updates.get(&point_offset) {
-            // Pending update exists but is empty, should not happen, fall back to real data
-            Some(pending) if pending.is_empty() => {
-                debug_assert!(false, "pending updates must not be empty");
-                self.get_raw(point_offset).flatten().cloned()
-            }
-            // Use set from pending updates
-            Some(pending) => pending.current,
-            // No pending update, use real data
-            None => self.get_raw(point_offset).flatten().cloned(),
-        }
+        let pointer_bytes = unsafe { transmute_to_u8(&pointer) };
+        self.storage.write(start_offset as u64, pointer_bytes)?;
+        Ok(())
     }
 
     /// Increment the header count if the given point offset is larger than the current count
-    fn write_pointer_count(&mut self) {
+    fn write_pointer_count(&mut self) -> Result<()> {
         self.header.next_pointer_offset = self.next_pointer_offset;
-        self.write_header();
-    }
-
-    pub fn has_pointer(&self, point_offset: PointOffset) -> bool {
-        self.get(point_offset).is_some()
+        self.write_header()
     }
 
     pub fn set(&mut self, point_offset: PointOffset, value_pointer: ValuePointer) {
@@ -481,8 +570,8 @@ impl Tracker {
     }
 
     /// Unset the value at the given point offset and return its previous value
-    pub fn unset(&mut self, point_offset: PointOffset) -> Option<ValuePointer> {
-        let pointer_opt = self.get(point_offset);
+    pub fn unset(&mut self, point_offset: PointOffset) -> Result<Option<ValuePointer>> {
+        let pointer_opt = self.get(point_offset)?;
 
         if let Some(pointer) = pointer_opt {
             self.pending_updates
@@ -491,11 +580,7 @@ impl Tracker {
                 .unset(pointer);
         }
 
-        pointer_opt
-    }
-
-    pub fn populate(&self) {
-        self.mmap.populate();
+        Ok(pointer_opt)
     }
 }
 
@@ -505,36 +590,39 @@ mod tests {
 
     #[expect(deprecated, reason = "legacy code")]
     use common::mmap::transmute_from_u8;
+    use common::universal_io::mmap::MmapUniversal;
     use rstest::rstest;
     use tempfile::Builder;
 
     use super::{PointerUpdates, Tracker, ValuePointer};
     use crate::tracker::{BlockOffset, Optional, PageId};
 
+    type TestTracker = Tracker<MmapUniversal<u8>>;
+
     #[test]
     fn test_file_name() {
         let path: PathBuf = "/tmp/test".into();
-        let file_name = Tracker::tracker_file_name(&path);
-        assert_eq!(file_name, path.join(Tracker::FILE_NAME));
+        let file_name = TestTracker::tracker_file_name(&path);
+        assert_eq!(file_name, path.join(TestTracker::FILE_NAME));
     }
 
     #[test]
     fn test_page_tracker_files() {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let tracker = Tracker::new(path, None);
+        let tracker = TestTracker::new(path, None).unwrap();
         let files = tracker.files();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0], path.join(Tracker::FILE_NAME));
+        assert_eq!(files[0], path.join(TestTracker::FILE_NAME));
     }
 
     #[test]
     fn test_new_tracker() {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let tracker = Tracker::new(path, None);
+        let tracker = TestTracker::new(path, None).unwrap();
         assert!(tracker.is_empty());
-        assert_eq!(tracker.mapping_len(), 0);
+        assert_eq!(tracker.mapping_len().unwrap(), 0);
         assert_eq!(tracker.pointer_count(), 0);
     }
 
@@ -545,21 +633,21 @@ mod tests {
     fn test_mapping_len_tracker(#[case] initial_tracker_size: usize) {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let mut tracker = Tracker::new(path, Some(initial_tracker_size));
+        let mut tracker = TestTracker::new(path, Some(initial_tracker_size)).unwrap();
         assert!(tracker.is_empty());
         tracker.set(0, ValuePointer::new(1, 1, 1));
 
         tracker.write_pending_and_flush_internal().unwrap();
 
         assert!(!tracker.is_empty());
-        assert_eq!(tracker.mapping_len(), 1);
+        assert_eq!(tracker.mapping_len().unwrap(), 1);
 
         tracker.set(100, ValuePointer::new(2, 2, 2));
 
         tracker.write_pending_and_flush_internal().unwrap();
 
         assert_eq!(tracker.pointer_count(), 101);
-        assert_eq!(tracker.mapping_len(), 2);
+        assert_eq!(tracker.mapping_len().unwrap(), 2);
     }
 
     #[rstest]
@@ -569,7 +657,7 @@ mod tests {
     fn test_set_get_clear_tracker(#[case] initial_tracker_size: usize) {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
-        let mut tracker = Tracker::new(path, Some(initial_tracker_size));
+        let mut tracker = TestTracker::new(path, Some(initial_tracker_size)).unwrap();
         tracker.set(0, ValuePointer::new(1, 1, 1));
         tracker.set(1, ValuePointer::new(2, 2, 2));
         tracker.set(2, ValuePointer::new(3, 3, 3));
@@ -577,28 +665,37 @@ mod tests {
 
         tracker.write_pending_and_flush_internal().unwrap();
         assert!(!tracker.is_empty());
-        assert_eq!(tracker.mapping_len(), 4);
+        assert_eq!(tracker.mapping_len().unwrap(), 4);
         assert_eq!(tracker.pointer_count(), 11); // accounts for empty slots
 
-        assert_eq!(tracker.get_raw(0), Some(Some(&ValuePointer::new(1, 1, 1))));
-        assert_eq!(tracker.get_raw(1), Some(Some(&ValuePointer::new(2, 2, 2))));
-        assert_eq!(tracker.get_raw(2), Some(Some(&ValuePointer::new(3, 3, 3))));
-        assert_eq!(tracker.get_raw(3), Some(None)); // intermediate empty slot
         assert_eq!(
-            tracker.get_raw(10),
-            Some(Some(&ValuePointer::new(10, 10, 10)))
+            tracker.get_raw(0).unwrap(),
+            Some(Some(ValuePointer::new(1, 1, 1)))
         );
-        assert_eq!(tracker.get_raw(100_000), None); // out of bounds
+        assert_eq!(
+            tracker.get_raw(1).unwrap(),
+            Some(Some(ValuePointer::new(2, 2, 2)))
+        );
+        assert_eq!(
+            tracker.get_raw(2).unwrap(),
+            Some(Some(ValuePointer::new(3, 3, 3)))
+        );
+        assert_eq!(tracker.get_raw(3).unwrap(), Some(None)); // intermediate empty slot
+        assert_eq!(
+            tracker.get_raw(10).unwrap(),
+            Some(Some(ValuePointer::new(10, 10, 10)))
+        );
+        assert_eq!(tracker.get_raw(100_000).unwrap(), None); // out of bounds
 
-        tracker.unset(1);
+        tracker.unset(1).unwrap();
 
         tracker.write_pending_and_flush_internal().unwrap();
 
         // the value has been cleared but the entry is still there
-        assert_eq!(tracker.get_raw(1), Some(None));
-        assert_eq!(tracker.get(1), None);
+        assert_eq!(tracker.get_raw(1).unwrap(), Some(None));
+        assert_eq!(tracker.get(1).unwrap(), None);
 
-        assert_eq!(tracker.mapping_len(), 3);
+        assert_eq!(tracker.mapping_len().unwrap(), 3);
         assert_eq!(tracker.pointer_count(), 11);
 
         // overwrite some values
@@ -607,8 +704,8 @@ mod tests {
 
         tracker.write_pending_and_flush_internal().unwrap();
 
-        assert_eq!(tracker.get(0), Some(ValuePointer::new(10, 10, 10)));
-        assert_eq!(tracker.get(2), Some(ValuePointer::new(30, 30, 30)));
+        assert_eq!(tracker.get(0).unwrap(), Some(ValuePointer::new(10, 10, 10)));
+        assert_eq!(tracker.get(2).unwrap(), Some(ValuePointer::new(30, 30, 30)));
     }
 
     #[rstest]
@@ -621,7 +718,7 @@ mod tests {
 
         let value_count: usize = 1000;
 
-        let mut tracker = Tracker::new(path, Some(initial_tracker_size));
+        let mut tracker = TestTracker::new(path, Some(initial_tracker_size)).unwrap();
 
         for i in 0..value_count {
             // save only half of the values
@@ -631,26 +728,26 @@ mod tests {
         }
         tracker.write_pending_and_flush_internal().unwrap();
 
-        assert_eq!(tracker.mapping_len(), value_count / 2);
+        assert_eq!(tracker.mapping_len().unwrap(), value_count / 2);
         assert_eq!(tracker.pointer_count(), value_count as u32 - 1);
 
         // drop the tracker
         drop(tracker);
 
         // reopen the tracker
-        let tracker = Tracker::open(path).unwrap();
-        assert_eq!(tracker.mapping_len(), value_count / 2);
+        let tracker = TestTracker::open(path).unwrap();
+        assert_eq!(tracker.mapping_len().unwrap(), value_count / 2);
         assert_eq!(tracker.pointer_count(), value_count as u32 - 1);
 
         // check the values
         for i in 0..value_count {
             if i % 2 == 0 {
                 assert_eq!(
-                    tracker.get(i as u32),
+                    tracker.get(i as u32).unwrap(),
                     Some(ValuePointer::new(i as u32, i as u32, i as u32))
                 );
             } else {
-                assert_eq!(tracker.get(i as u32), None);
+                assert_eq!(tracker.get(i as u32).unwrap(), None);
             }
         }
     }
@@ -667,9 +764,9 @@ mod tests {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
 
-        let mut tracker = Tracker::new(path, Some(desired_tracker_size));
-        assert_eq!(tracker.mapping_len(), 0);
-        assert_eq!(tracker.mmap_file_size(), actual_tracker_size);
+        let mut tracker = TestTracker::new(path, Some(desired_tracker_size)).unwrap();
+        assert_eq!(tracker.mapping_len().unwrap(), 0);
+        assert_eq!(tracker.mmap_file_size().unwrap(), actual_tracker_size);
 
         for i in 0..100_000 {
             tracker.set(i, ValuePointer::new(i, i, i));
@@ -677,8 +774,8 @@ mod tests {
 
         tracker.write_pending_and_flush_internal().unwrap();
 
-        assert_eq!(tracker.mapping_len(), 100_000);
-        assert!(tracker.mmap_file_size() > actual_tracker_size);
+        assert_eq!(tracker.mapping_len().unwrap(), 100_000);
+        assert!(tracker.mmap_file_size().unwrap() > actual_tracker_size);
     }
 
     #[test]
@@ -686,14 +783,14 @@ mod tests {
         let file = Builder::new().prefix("test-tracker").tempdir().unwrap();
         let path = file.path();
 
-        let mut tracker = Tracker::new(path, None);
-        assert_eq!(tracker.mapping_len(), 0);
+        let mut tracker = TestTracker::new(path, None).unwrap();
+        assert_eq!(tracker.mapping_len().unwrap(), 0);
 
         let page_pointer = ValuePointer::new(1, 1, 1);
         let key = 1_000_000;
 
         tracker.set(key, page_pointer);
-        assert_eq!(tracker.get(key), Some(page_pointer));
+        assert_eq!(tracker.get(key).unwrap(), Some(page_pointer));
     }
 
     #[test]
@@ -811,11 +908,11 @@ mod tests {
     #[test]
     fn test_option_value_pointer_layout() {
         #[repr(align(4))]
-        struct AlignedData([u8; size_of::<Optional<ValuePointer>>()]);
+        struct AlignedData([u8; std::mem::size_of::<Optional<ValuePointer>>()]);
 
         assert_eq!(
-            size_of::<Optional<ValuePointer>>(),
-            size_of::<Option<ValuePointer>>()
+            std::mem::size_of::<Optional<ValuePointer>>(),
+            std::mem::size_of::<Option<ValuePointer>>()
         );
 
         let none_data = AlignedData([0; _]);
@@ -846,8 +943,8 @@ mod tests {
     #[ignore = "contains undefined behavior"]
     fn test_layout_compatibility() {
         assert_eq!(
-            size_of::<Optional<ValuePointer>>(),
-            size_of::<Option<ValuePointer>>()
+            std::mem::size_of::<Optional<ValuePointer>>(),
+            std::mem::size_of::<Option<ValuePointer>>()
         );
 
         let old_none = Option::<ValuePointer>::None;
@@ -875,8 +972,10 @@ mod tests {
         unsafe fn compare_layout<A, B>(a: &A, b: &B) {
             use std::slice::from_raw_parts;
 
-            let a_data = unsafe { from_raw_parts((a as *const A).cast::<u8>(), size_of::<A>()) };
-            let b_data = unsafe { from_raw_parts((b as *const B).cast::<u8>(), size_of::<B>()) };
+            let a_data =
+                unsafe { from_raw_parts((a as *const A).cast::<u8>(), std::mem::size_of::<A>()) };
+            let b_data =
+                unsafe { from_raw_parts((b as *const B).cast::<u8>(), std::mem::size_of::<B>()) };
 
             assert_eq!(a_data, b_data);
         }

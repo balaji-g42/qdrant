@@ -89,6 +89,7 @@ pub trait PayloadIndex {
         filter: &Filter,
         hw_counter: &HardwareCounterCell,
         is_stopped: &AtomicBool,
+        deferred_internal_id: Option<PointOffsetType>,
     ) -> Vec<PointOffsetType>;
 
     /// Return number of points, indexed by this field
@@ -106,7 +107,7 @@ pub trait PayloadIndex {
         &self,
         field: PayloadKeyTypeRef,
         threshold: usize,
-    ) -> Box<dyn Iterator<Item = PayloadBlockCondition> + '_>;
+    ) -> Box<dyn Iterator<Item = OperationResult<PayloadBlockCondition>> + '_>;
 
     /// Overwrite payload for point_id. If payload already exists, replace it.
     fn overwrite_payload(

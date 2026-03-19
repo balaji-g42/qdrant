@@ -5,6 +5,7 @@ use std::path::Path;
 
 use atomicwrites::AtomicFile;
 use atomicwrites::OverwriteBehavior::AllowOverwrite;
+use common::types::PointOffsetType;
 use fs_err::File;
 use schemars::JsonSchema;
 use segment::common::anonymize::Anonymize;
@@ -22,8 +23,8 @@ use wal::WalOptions;
 
 use crate::operations::config_diff::{DiffConfig, QuantizationConfigDiff};
 use crate::operations::types::{
-    CollectionError, CollectionResult, CollectionWarning, SparseVectorParams, SparseVectorsConfig,
-    VectorParams, VectorParamsDiff, VectorsConfig, VectorsConfigDiff,
+    CollectionError, CollectionResult, CollectionWarning, Datatype, SparseVectorParams,
+    SparseVectorsConfig, VectorParams, VectorParamsDiff, VectorsConfig, VectorsConfigDiff,
 };
 use crate::operations::validation;
 use crate::optimizers_builder::OptimizersConfig;
@@ -150,11 +151,7 @@ impl CollectionParams {
         }
 
         #[cfg(not(feature = "rocksdb"))]
-        if self.on_disk_payload {
-            PayloadStorageType::Mmap
-        } else {
-            PayloadStorageType::InRamMmap
-        }
+        PayloadStorageType::from_on_disk_payload(self.on_disk_payload)
     }
 
     pub fn check_compatible(&self, other: &CollectionParams) -> CollectionResult<()> {
@@ -204,6 +201,47 @@ impl CollectionParams {
         }
 
         Ok(())
+    }
+
+    pub fn get_deferred_point_id(
+        &self,
+        hnsw_config: &HnswConfig,
+        deferred_point_threshold_bytes: Option<NonZeroUsize>,
+    ) -> Option<PointOffsetType> {
+        let threshold_bytes = deferred_point_threshold_bytes?.get();
+
+        // Because we cannot predict multivector size,
+        // define here a constant-size inner vectors count for multivector.
+        const MULTIVECTOR_SIZE: usize = 16;
+
+        self.vectors
+            .params_iter()
+            // Skip vectors without HNSW indexing
+            .filter_map(|(_name, params)| {
+                // Merge HNSW config with vector config to get effective HNSW config for the vector.
+                let effective_hnsw = hnsw_config.update_opt(params.hnsw_config.as_ref());
+                (effective_hnsw.m > 0 || effective_hnsw.payload_m.unwrap_or_default() > 0)
+                    .then_some(params)
+            })
+            .map(|params| {
+                let element_bytes = match params.datatype {
+                    Some(Datatype::Float16) => 2,
+                    Some(Datatype::Uint8) => 1,
+                    Some(Datatype::Float32) | None => 4,
+                };
+
+                let dim = params.size.get() as usize;
+
+                let vector_bytes = if params.multivector_config.is_some() {
+                    element_bytes * dim * MULTIVECTOR_SIZE
+                } else {
+                    element_bytes * dim
+                };
+
+                let deferred_from = threshold_bytes.div_ceil(vector_bytes);
+                PointOffsetType::try_from(deferred_from).unwrap_or(PointOffsetType::MAX)
+            })
+            .min()
     }
 }
 
@@ -317,7 +355,7 @@ impl CollectionConfigInternal {
         warnings
     }
 
-    pub fn to_base_segment_config(&self) -> CollectionResult<SegmentConfig> {
+    pub fn to_base_segment_config(&self) -> SegmentConfig {
         self.params
             .to_base_segment_config(self.quantization_config.as_ref())
     }
@@ -534,7 +572,7 @@ impl CollectionParams {
     pub fn to_base_vector_data(
         &self,
         collection_quantization: Option<&QuantizationConfig>,
-    ) -> CollectionResult<HashMap<VectorNameBuf, VectorDataConfig>> {
+    ) -> HashMap<VectorNameBuf, VectorDataConfig> {
         let quantization_fn = |quantization_config: Option<&QuantizationConfig>| {
             quantization_config
                 // Only if there is no `quantization_config` we may start using `collection_quantization` (to avoid mixing quantizations between segments)
@@ -543,8 +581,7 @@ impl CollectionParams {
                 .cloned()
         };
 
-        Ok(self
-            .vectors
+        self.vectors
             .params_iter()
             .map(|(name, params)| {
                 (
@@ -570,21 +607,19 @@ impl CollectionParams {
                     },
                 )
             })
-            .collect())
+            .collect()
     }
 
     /// Convert into unoptimized sparse vector data configs
     ///
     /// It is the job of the segment optimizer to change this configuration with optimized settings
     /// based on threshold configurations.
-    pub fn to_sparse_vector_data(
-        &self,
-    ) -> CollectionResult<HashMap<VectorNameBuf, SparseVectorDataConfig>> {
+    pub fn to_sparse_vector_data(&self) -> HashMap<VectorNameBuf, SparseVectorDataConfig> {
         if let Some(sparse_vectors) = &self.sparse_vectors {
             sparse_vectors
                 .iter()
                 .map(|(name, params)| {
-                    Ok((
+                    (
                         name.clone(),
                         SparseVectorDataConfig {
                             index: SparseIndexConfig {
@@ -600,11 +635,11 @@ impl CollectionParams {
                             storage_type: params.storage_type(),
                             modifier: params.modifier,
                         },
-                    ))
+                    )
                 })
                 .collect()
         } else {
-            Ok(Default::default())
+            Default::default()
         }
     }
 
@@ -615,29 +650,15 @@ impl CollectionParams {
     pub fn to_base_segment_config(
         &self,
         collection_quantization: Option<&QuantizationConfig>,
-    ) -> CollectionResult<SegmentConfig> {
-        let vector_data = self
-            .to_base_vector_data(collection_quantization)
-            .map_err(|err| {
-                CollectionError::service_error(format!(
-                    "Failed to source dense vector configuration from collection parameters: {err:?}"
-                ))
-            })?;
-
-        let sparse_vector_data = self.to_sparse_vector_data().map_err(|err| {
-            CollectionError::service_error(format!(
-                "Failed to source sparse vector configuration from collection parameters: {err:?}"
-            ))
-        })?;
-
+    ) -> SegmentConfig {
+        let vector_data = self.to_base_vector_data(collection_quantization);
+        let sparse_vector_data = self.to_sparse_vector_data();
         let payload_storage_type = self.payload_storage_type();
 
-        let segment_config = SegmentConfig {
+        SegmentConfig {
             vector_data,
             sparse_vector_data,
             payload_storage_type,
-        };
-
-        Ok(segment_config)
+        }
     }
 }

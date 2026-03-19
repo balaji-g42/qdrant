@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use std::{cmp, fmt, thread};
+use std::{cmp, thread};
 
 use anyhow::{Context as _, anyhow};
 use api::grpc::dynamic_channel_pool::make_grpc_channel;
@@ -725,7 +725,7 @@ impl Consensus {
     }
 
     fn is_leader(&self) -> bool {
-        self.node.status().ss.raft_state == raft::StateRole::Leader
+        self.node.status().ss.raft_state == StateRole::Leader
     }
 
     fn try_sync_local_state(&self) -> anyhow::Result<()> {
@@ -773,7 +773,7 @@ impl Consensus {
         // If we reached this point, we are the origin peer, but it's impossible to propose anything
         // to consensus, before leader is elected (`propose_conf_change` will return an error),
         // so we have to wait for a few ticks for self-election
-        if status.ss.raft_state != StateRole::Leader {
+        if !self.is_leader() {
             return Err(TryAddOriginError::NotLeader);
         }
 
@@ -808,7 +808,7 @@ impl Consensus {
     /// that guarantees that learner will start voting only after it applies all the changes in the log
     fn try_promote_learner(&mut self) -> anyhow::Result<bool> {
         // Promote only if leader
-        if self.node.status().ss.raft_state != StateRole::Leader {
+        if !self.is_leader() {
             return Ok(false);
         }
 
@@ -1142,14 +1142,16 @@ impl RaftMessageBroker {
             let failed_to_forward = |message: &RaftMessage, description: &str| {
                 let peer_id = message.to;
 
-                let is_debug = log::max_level() >= log::Level::Debug;
-                let space = if is_debug { " " } else { "" };
-                let message: &dyn fmt::Debug = if is_debug { &message } else { &"" }; // TODO: `fmt::Debug` for `""` prints `""`... 😒
-
-                log::error!(
-                    "Failed to forward message{space}{message:?} to message sender task {peer_id}: \
-                     {description}"
-                );
+                if log::max_level() >= log::Level::Debug {
+                    log::error!(
+                        "Failed to forward message {message:?} to message sender task {peer_id}: \
+                         {description}"
+                    );
+                } else {
+                    log::error!(
+                        "Failed to forward message to message sender task {peer_id}: {description}"
+                    );
+                }
             };
 
             match sender.send(message).map_err(|err| *err) {
@@ -1450,7 +1452,7 @@ mod tests {
     use storage::content_manager::consensus_manager::{ConsensusManager, ConsensusStateRef};
     use storage::content_manager::toc::TableOfContent;
     use storage::dispatcher::Dispatcher;
-    use storage::rbac::{Access, Auth, AuthType};
+    use storage::rbac::{Access, Auth};
     use tempfile::Builder;
 
     use super::Consensus;
@@ -1574,7 +1576,7 @@ mod tests {
                         )
                         .unwrap(),
                     ),
-                    Auth::new(Access::full("For test"), None, None, AuthType::Internal),
+                    Auth::new_internal(Access::full("For test")),
                     None,
                 ),
             )

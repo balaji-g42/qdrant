@@ -22,6 +22,7 @@ use std::sync::Arc;
 use atomic_refcell::AtomicRefCell;
 use common::is_alive_lock::IsAliveLock;
 use common::storage_version::StorageVersion;
+use common::types::PointOffsetType;
 use parking_lot::Mutex;
 #[cfg(feature = "rocksdb")]
 use rocksdb::DB;
@@ -29,7 +30,7 @@ use uuid::Uuid;
 
 use self::version_tracker::VersionTracker;
 use crate::common::operation_error::SegmentFailedState;
-use crate::id_tracker::IdTrackerSS;
+use crate::id_tracker::IdTrackerEnum;
 use crate::index::VectorIndexEnum;
 use crate::index::struct_payload_index::StructPayloadIndex;
 use crate::payload_storage::payload_storage_enum::PayloadStorageEnum;
@@ -79,7 +80,7 @@ pub struct Segment {
     pub segment_path: PathBuf,
     pub version_tracker: VersionTracker,
     /// Component for mapping external ids to internal and also keeping track of point versions
-    pub id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    pub id_tracker: Arc<AtomicRefCell<IdTrackerEnum>>,
     pub vector_data: HashMap<VectorNameBuf, VectorData>,
     pub payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
     pub payload_storage: Arc<AtomicRefCell<PayloadStorageEnum>>,
@@ -93,6 +94,9 @@ pub struct Segment {
     pub error_status: Option<SegmentFailedState>,
     #[cfg(feature = "rocksdb")]
     pub database: Option<Arc<parking_lot::RwLock<DB>>>,
+    /// Points with internal id >= this value are hidden from reads.
+    /// Available for appendable segments only.
+    pub(crate) deferred_internal_id: Option<PointOffsetType>,
 }
 
 pub struct VectorData {

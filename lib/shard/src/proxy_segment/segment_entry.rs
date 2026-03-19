@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use ahash::AHashMap;
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::TelemetryDetail;
+use common::types::{DeferredBehavior, TelemetryDetail};
 use segment::common::Flusher;
 use segment::common::operation_error::{OperationError, OperationResult, SegmentFailedState};
 use segment::data_types::build_index_result::BuildFieldIndexResult;
@@ -216,6 +216,7 @@ impl NonAppendableSegmentEntry for ProxySegment {
         with_vector: &WithVector,
         hw_counter: &HardwareCounterCell,
         is_stopped: &AtomicBool,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<AHashMap<ExtendedPointId, SegmentRecord>> {
         let filtered_point_ids: Vec<PointIdType> = point_ids
             .iter()
@@ -228,6 +229,7 @@ impl NonAppendableSegmentEntry for ProxySegment {
             with_vector,
             hw_counter,
             is_stopped,
+            deferred_behavior,
         )
     }
 
@@ -245,12 +247,17 @@ impl NonAppendableSegmentEntry for ProxySegment {
         filter: Option<&'a Filter>,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
-    ) -> Vec<PointIdType> {
+        deferred_behavior: DeferredBehavior,
+    ) -> OperationResult<Vec<PointIdType>> {
         if self.deleted_points.is_empty() {
-            self.wrapped_segment
-                .get()
-                .read()
-                .read_filtered(offset, limit, filter, is_stopped, hw_counter)
+            self.wrapped_segment.get().read().read_filtered(
+                offset,
+                limit,
+                filter,
+                is_stopped,
+                hw_counter,
+                deferred_behavior,
+            )
         } else {
             let wrapped_filter = Self::add_deleted_points_condition_to_filter(
                 filter,
@@ -262,6 +269,7 @@ impl NonAppendableSegmentEntry for ProxySegment {
                 Some(&wrapped_filter),
                 is_stopped,
                 hw_counter,
+                deferred_behavior,
             )
         }
     }
@@ -273,12 +281,17 @@ impl NonAppendableSegmentEntry for ProxySegment {
         order_by: &'a segment::data_types::order_by::OrderBy,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
+        deferred_behavior: DeferredBehavior,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>> {
         let read_points = if self.deleted_points.is_empty() {
-            self.wrapped_segment
-                .get()
-                .read()
-                .read_ordered_filtered(limit, filter, order_by, is_stopped, hw_counter)?
+            self.wrapped_segment.get().read().read_ordered_filtered(
+                limit,
+                filter,
+                order_by,
+                is_stopped,
+                hw_counter,
+                deferred_behavior,
+            )?
         } else {
             let wrapped_filter = Self::add_deleted_points_condition_to_filter(
                 filter,
@@ -290,6 +303,7 @@ impl NonAppendableSegmentEntry for ProxySegment {
                 order_by,
                 is_stopped,
                 hw_counter,
+                deferred_behavior,
             )?
         };
         Ok(read_points)
@@ -301,7 +315,7 @@ impl NonAppendableSegmentEntry for ProxySegment {
         filter: Option<&'a Filter>,
         is_stopped: &AtomicBool,
         hw_counter: &HardwareCounterCell,
-    ) -> Vec<PointIdType> {
+    ) -> OperationResult<Vec<PointIdType>> {
         if self.deleted_points.is_empty() {
             self.wrapped_segment
                 .get()
@@ -422,14 +436,14 @@ impl NonAppendableSegmentEntry for ProxySegment {
         &'a self,
         filter: Option<&'a Filter>,
         hw_counter: &HardwareCounterCell,
-    ) -> CardinalityEstimation {
+    ) -> OperationResult<CardinalityEstimation> {
         let deleted_point_count = self.deleted_points.len();
 
         let (wrapped_segment_est, total_wrapped_size) = {
             let wrapped_segment = self.wrapped_segment.get();
             let wrapped_segment_guard = wrapped_segment.read();
             (
-                wrapped_segment_guard.estimate_point_count(filter, hw_counter),
+                wrapped_segment_guard.estimate_point_count(filter, hw_counter)?,
                 wrapped_segment_guard.available_point_count(),
             )
         };
@@ -448,12 +462,12 @@ impl NonAppendableSegmentEntry for ProxySegment {
             max,
         } = wrapped_segment_est;
 
-        CardinalityEstimation {
+        Ok(CardinalityEstimation {
             primary_clauses,
             min: min.saturating_sub(deleted_point_count),
             exp: exp.saturating_sub(expected_deleted_count),
             max,
-        }
+        })
     }
 
     fn segment_uuid(&self) -> Uuid {
@@ -506,6 +520,7 @@ impl NonAppendableSegmentEntry for ProxySegment {
             is_appendable: false,
             index_schema: wrapped_info.index_schema,
             vector_data,
+            deferred_internal_id: wrapped_info.deferred_internal_id,
         }
     }
 
@@ -702,6 +717,21 @@ impl NonAppendableSegmentEntry for ProxySegment {
             .read()
             .fill_query_context(query_context)
     }
+
+    fn point_is_deferred(&self, point_id: PointIdType) -> bool {
+        !self.deleted_points.contains_key(&point_id)
+            && self
+                .wrapped_segment
+                .get()
+                .read()
+                .point_is_deferred(point_id)
+    }
+
+    fn deferred_point_ids(&self) -> Vec<PointIdType> {
+        let mut ids = self.wrapped_segment.get().read().deferred_point_ids();
+        ids.retain(|point_id| !self.deleted_points.contains_key(point_id));
+        ids
+    }
 }
 
 impl SegmentEntry for ProxySegment {
@@ -787,5 +817,9 @@ impl SegmentEntry for ProxySegment {
         Err(OperationError::service_error(format!(
             "Clear payload is disabled for proxy segments: operation {op_num} on point {point_id}",
         )))
+    }
+
+    fn deferred_points_count(&self) -> usize {
+        self.wrapped_segment.get().read().deferred_points_count()
     }
 }

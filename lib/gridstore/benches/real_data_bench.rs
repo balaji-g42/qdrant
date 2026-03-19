@@ -7,7 +7,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use fs_err as fs;
 use fs_err::File;
 use gridstore::fixtures::{HM_FIELDS, Payload, empty_storage};
-use rand::Rng;
+use rand::RngExt;
 use serde_json::Value;
 
 /// Insert CSV data into the storage
@@ -89,7 +89,7 @@ pub fn real_data_data_bench(c: &mut Criterion) {
         let hw_counter = HardwareCounterCell::new();
         b.iter(|| {
             for i in 0..storage.max_point_offset() {
-                let res = storage.get_value::<false>(i, &hw_counter).unwrap();
+                let res = storage.get_value::<false>(i, &hw_counter).unwrap().unwrap();
                 assert!(res.0.contains_key("article_id"));
             }
         });

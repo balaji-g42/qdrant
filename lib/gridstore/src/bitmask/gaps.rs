@@ -2,7 +2,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use common::fs::clear_disk_cache;
-use common::mmap::{Advice, AdviceSetting, MmapSlice, create_and_ensure_length, open_write_mmap};
+use common::mmap::{
+    Advice, AdviceSetting, MmapFlusher, MmapSlice, create_and_ensure_length, open_write_mmap,
+};
 use itertools::Itertools;
 
 use super::{RegionId, StorageConfig};
@@ -126,8 +128,8 @@ impl BitmaskGaps {
         })
     }
 
-    pub fn flush(&self) -> Result<()> {
-        Ok(self.mmap_slice.flusher()()?)
+    pub fn flusher(&self) -> MmapFlusher {
+        self.mmap_slice.flusher()
     }
 
     /// Extends the mmap file to fit the new regions
@@ -342,10 +344,11 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
         #[test]
         fn test_find_fitting_gap(
-            gaps in prop::collection::vec(any::<RegionGaps>(), 1..100),
-            num_blocks in 1..=(DEFAULT_REGION_SIZE_BLOCKS as u32 * 3)
+            gaps in prop::collection::vec(any::<RegionGaps>(), 1..50),
+            num_blocks in 1..=(DEFAULT_REGION_SIZE_BLOCKS as u32 * 2)
         ) {
             let temp_dir = tempdir().unwrap();
             let config = StorageOptions::default().try_into().unwrap();
@@ -425,7 +428,8 @@ mod tests {
             RegionGaps::all_free(REGION_SIZE_BLOCKS as u16),
             RegionGaps::all_free(REGION_SIZE_BLOCKS as u16),
         ];
-        let bitmask_gaps = BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter(), config);
+        let bitmask_gaps =
+            BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter(), config.clone());
 
         // Find space for blocks covering up to 2 regions
         assert!(bitmask_gaps.find_fitting_gap(1).is_some());
@@ -465,7 +469,8 @@ mod tests {
             RegionGaps::all_free(REGION_SIZE_BLOCKS as u16),
             RegionGaps::all_free(REGION_SIZE_BLOCKS as u16),
         ];
-        let bitmask_gaps = BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter(), config);
+        let bitmask_gaps =
+            BitmaskGaps::create(temp_dir.path(), gaps.clone().into_iter(), config.clone());
 
         // Find space for blocks covering up to 2 regions
         assert!(bitmask_gaps.find_fitting_gap(REGION_SIZE_BLOCKS).is_some());

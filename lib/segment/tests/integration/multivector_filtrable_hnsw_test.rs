@@ -8,7 +8,7 @@ use common::progress_tracker::ProgressTracker;
 use common::types::TelemetryDetail;
 use ordered_float::OrderedFloat;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rstest::rstest;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, only_default_multi_vector};
 use segment::entry::entry_point::SegmentEntry;
@@ -29,8 +29,8 @@ use tempfile::Builder;
 #[rstest]
 #[case::nearest_eq(QueryVariant::Nearest, 1, 32, 5)]
 #[case::nearest_multi(QueryVariant::Nearest, 3, 64, 20)]
-#[case::discovery_eq(QueryVariant::Discovery, 1, 128, 5)]
-#[case::discovery_multi(QueryVariant::Discovery, 3, 128, 20)]
+#[case::discover_eq(QueryVariant::Discover, 1, 128, 5)]
+#[case::discover_multi(QueryVariant::Discover, 3, 128, 20)]
 #[case::recobestscore_eq(QueryVariant::RecoBestScore, 1, 64, 5)]
 #[case::recobestscore_multi(QueryVariant::RecoBestScore, 2, 64, 10)]
 #[case::recosumscores_eq(QueryVariant::RecoSumScores, 1, 64, 5)]
@@ -83,7 +83,7 @@ fn test_multi_filterable_hnsw(
 
     let hw_counter = HardwareCounterCell::new();
 
-    let mut segment = build_segment(dir.path(), &config, true).unwrap();
+    let mut segment = build_segment(dir.path(), &config, None, true).unwrap();
     for n in 0..num_points {
         let idx = n.into();
         // Random number of vectors per multivec point

@@ -14,6 +14,7 @@ pub mod utils;
 use std::path::PathBuf;
 
 use bytemuck::TransparentWrapperAlloc as _;
+use edge::EdgeConfig;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use segment::common::operation_error::OperationError;
@@ -40,17 +41,14 @@ mod qdrant_edge {
         PyScalarQuantizationConfig, PyScalarType,
     };
     #[pymodule_export]
-    use super::config::sparse_vector_data::{
-        PyModifier, PySparseIndexConfig, PySparseIndexType, PySparseVectorDataConfig,
-        PySparseVectorStorageType,
-    };
+    use super::config::sparse_vector_data::{PyEdgeSparseVectorParams, PyModifier};
     #[pymodule_export]
     use super::config::vector_data::{
-        PyDistance, PyHnswIndexConfig, PyMultiVectorComparator, PyMultiVectorConfig,
-        PyPlainIndexConfig, PyVectorDataConfig, PyVectorStorageDatatype, PyVectorStorageType,
+        PyDistance, PyEdgeVectorParams, PyHnswIndexConfig, PyMultiVectorComparator,
+        PyMultiVectorConfig, PyPlainIndexConfig, PyVectorStorageDatatype,
     };
     #[pymodule_export]
-    use super::config::{PyEdgeConfig, PyPayloadStorageType};
+    use super::config::{PyEdgeConfig, PyEdgeOptimizersConfig};
     #[pymodule_export]
     use super::count::PyCountRequest;
     #[pymodule_export]
@@ -75,6 +73,13 @@ mod qdrant_edge {
     #[pymodule_export]
     use super::types::formula::{PyDecayKind, PyExpressionInterface, PyFormula};
     #[pymodule_export]
+    use super::types::payload_schema::{
+        PyBoolIndexParams, PyDatetimeIndexParams, PyFloatIndexParams, PyGeoIndexParams,
+        PyIntegerIndexParams, PyKeywordIndexParams, PyLanguage, PyPayloadSchemaType,
+        PySnowballLanguage, PySnowballParams, PyStopwordsSet, PyTextIndexParams, PyTokenizerType,
+        PyUuidIndexParams,
+    };
+    #[pymodule_export]
     use super::types::query::{
         PyContextPair, PyContextQuery, PyDiscoverQuery, PyFeedbackItem, PyFeedbackNaiveQuery,
         PyNaiveFeedbackCoefficients, PyPayloadSelectorInterface, PyQueryInterface,
@@ -92,16 +97,31 @@ pub struct PyEdgeShard(Option<edge::EdgeShard>);
 
 #[pymethods]
 impl PyEdgeShard {
-    #[new]
+    /// Load an edge shard from existing files at `path`.
+    /// Optional `config`: if provided, compatibility is checked and config is overwritten on disk.
+    #[staticmethod]
     #[pyo3(signature = (path, config = None))]
     pub fn load(path: PathBuf, config: Option<PyEdgeConfig>) -> Result<Self> {
-        let shard = edge::EdgeShard::load(&path, config.map(SegmentConfig::from))?;
+        let shard = edge::EdgeShard::load(&path, config.map(EdgeConfig::from))?;
+        Ok(Self(Some(shard)))
+    }
+
+    /// Create a new edge shard at `path` with the given configuration.
+    /// Fails if the path already contains segment data.
+    #[staticmethod]
+    pub fn create(path: PathBuf, config: PyEdgeConfig) -> Result<Self> {
+        let shard = edge::EdgeShard::new(&path, config.0)?;
         Ok(Self(Some(shard)))
     }
 
     pub fn flush(&self) -> Result<()> {
         self.get_shard()?.flush();
         Ok(())
+    }
+
+    pub fn optimize(&self) -> Result<bool> {
+        let optimized = self.get_shard()?.optimize()?;
+        Ok(optimized)
     }
 
     pub fn close(&mut self) {

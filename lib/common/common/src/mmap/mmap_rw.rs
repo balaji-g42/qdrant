@@ -321,6 +321,12 @@ impl<T> DerefMut for MmapSlice<T> {
     }
 }
 
+impl<T: 'static> AsRef<[T]> for MmapSlice<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.mmap
+    }
+}
+
 /// [`BitSlice`] on a memory mapped file
 ///
 /// Functions as if it is a [`BitSlice`] because this implements [`Deref`] and [`DerefMut`].
@@ -575,7 +581,7 @@ mod tests {
     use std::iter;
 
     use rand::rngs::{SmallRng, StdRng};
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use tempfile::{Builder, NamedTempFile};
 
     use super::*;

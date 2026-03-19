@@ -9,12 +9,12 @@ use common::progress_tracker::ProgressTracker;
 use common::types::PointOffsetType;
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
-use rand::Rng;
+use rand::RngExt;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, only_default_vector};
 use segment::entry::entry_point::SegmentEntry;
 use segment::fixtures::payload_fixtures::{random_int_payload, random_vector};
+use segment::index::hnsw_index::get_num_indexing_threads;
 use segment::index::hnsw_index::hnsw::{HNSWIndex, HnswIndexOpenArgs};
-use segment::index::hnsw_index::num_rayon_threads;
 use segment::index::{PayloadIndex, VectorIndex};
 use segment::json_path::JsonPath;
 use segment::payload_json;
@@ -95,6 +95,7 @@ fn exact_search_test() {
     let borrowed_payload_index = payload_index_ptr.borrow();
     let blocks = borrowed_payload_index
         .payload_blocks(&JsonPath::new(int_key), indexing_threshold)
+        .map(Result::unwrap)
         .collect_vec();
     for block in blocks.iter() {
         assert!(
@@ -107,7 +108,7 @@ fn exact_search_test() {
     for block in &blocks {
         let px = payload_index_ptr.borrow();
         let filter = Filter::new_must(Condition::Field(block.condition.clone()));
-        let points = px.query_points(&filter, &hw_counter, &is_stopped);
+        let points = px.query_points(&filter, &hw_counter, &is_stopped, None);
         for point in points {
             coverage.insert(point, coverage.get(&point).unwrap_or(&0) + 1);
         }
@@ -126,7 +127,7 @@ fn exact_search_test() {
         "not all points are covered by payload blocks"
     );
 
-    let permit_cpu_count = num_rayon_threads(hnsw_config.max_indexing_threads);
+    let permit_cpu_count = get_num_indexing_threads(hnsw_config.max_indexing_threads);
     let permit = Arc::new(ResourcePermit::dummy(permit_cpu_count as u32));
     let hnsw_index = HNSWIndex::build(
         HnswIndexOpenArgs {
