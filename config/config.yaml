@@ -252,6 +252,12 @@ service:
   # HTTP(S) port to bind the service on
   http_port: 6333
 
+  # Optional additional base path for Web UI entrypoint.
+  # REST API stays on root (`/`) for compatibility.
+  # Default is root (`/`) which keeps Web UI at `/dashboard`.
+  # Example: with `/qdrant`, Web UI is available at both `/dashboard` and `/qdrant/dashboard`.
+  # base_path: /qdrant
+
   # gRPC port to bind the service on.
   # If `null` - gRPC is disabled. Default: null
   # Comment to disable gRPC:

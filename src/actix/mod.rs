@@ -42,7 +42,7 @@ use crate::actix::api::shards_api::config_shards_api;
 use crate::actix::api::snapshot_api::config_snapshots_api;
 use crate::actix::api::update_api::config_update_api;
 use crate::actix::auth::{AuthTransform, WhitelistItem};
-use crate::actix::web_ui::{WEB_UI_PATH, web_ui_factory, web_ui_folder};
+use crate::actix::web_ui::{WEB_UI_PATH, web_ui_factory, web_ui_folder, web_ui_mount_path};
 use crate::common::auth::AuthKeys;
 use crate::common::debugger::DebuggerState;
 use crate::common::health;
@@ -54,6 +54,41 @@ use crate::tracing::LoggerHandle;
 #[get("/")]
 pub async fn index() -> impl Responder {
     HttpResponse::Ok().json(VersionInfo::default())
+}
+
+fn with_base_path(base_path: &str, path: &str) -> String {
+    if base_path == "/" {
+        path.to_string()
+    } else if path == "/" {
+        base_path.to_string()
+    } else {
+        format!("{base_path}{path}")
+    }
+}
+
+fn configure_api(cfg: &mut web::ServiceConfig) {
+    cfg.service(index)
+        .configure(config_collections_api)
+        .configure(config_snapshots_api)
+        .configure(config_update_api)
+        .configure(config_cluster_api)
+        .configure(config_service_api)
+        .configure(config_search_api)
+        .configure(config_recommend_api)
+        .configure(config_discover_api)
+        .configure(config_query_api)
+        .configure(config_facet_api)
+        .configure(config_shards_api)
+        .configure(config_issues_api)
+        .configure(config_debugger_api)
+        .configure(config_profiler_api)
+        .configure(config_local_shard_api)
+        // Ordering of services is important for correct path pattern matching
+        // See: <https://github.com/qdrant/qdrant/issues/3543>
+        .service(scroll_points)
+        .service(count_points)
+        .service(get_point)
+        .service(get_points);
 }
 
 pub fn init(
@@ -83,6 +118,16 @@ pub fn init(
         let health_checker = web::Data::new(health_checker);
         let web_ui_available = web_ui_folder(&settings);
         let service_config = web::Data::new(settings.service.clone());
+        let base_path = settings.service.normalized_base_path();
+        let custom_web_ui_path = web_ui_mount_path(&base_path);
+        let custom_index_path = with_base_path(&base_path, "/");
+        let custom_healthz_path = with_base_path(&base_path, "/healthz");
+        let custom_readyz_path = with_base_path(&base_path, "/readyz");
+        let custom_livez_path = with_base_path(&base_path, "/livez");
+        let custom_metrics_path = with_base_path(&base_path, "/metrics");
+        let custom_telemetry_path = with_base_path(&base_path, "/telemetry");
+
+        let static_folder_opt = web_ui_available.clone();
 
         let mut api_key_whitelist = vec![
             WhitelistItem::exact("/"),
@@ -90,8 +135,17 @@ pub fn init(
             WhitelistItem::prefix("/readyz"),
             WhitelistItem::prefix("/livez"),
         ];
+        if base_path != "/" {
+            api_key_whitelist.push(WhitelistItem::exact(custom_index_path.clone()));
+            api_key_whitelist.push(WhitelistItem::exact(custom_healthz_path.clone()));
+            api_key_whitelist.push(WhitelistItem::prefix(custom_readyz_path.clone()));
+            api_key_whitelist.push(WhitelistItem::prefix(custom_livez_path.clone()));
+        }
         if web_ui_available.is_some() {
             api_key_whitelist.push(WhitelistItem::prefix(WEB_UI_PATH));
+            if custom_web_ui_path != WEB_UI_PATH {
+                api_key_whitelist.push(WhitelistItem::prefix(custom_web_ui_path.clone()));
+            }
         }
 
         let mut server = HttpServer::new(move || {
@@ -125,7 +179,13 @@ pub fn init(
                         .exclude("/telemetry")
                         .exclude("/healthz")
                         .exclude("/readyz")
-                        .exclude("/livez"),
+                        .exclude("/livez")
+                        .exclude(custom_index_path.as_str())
+                        .exclude(custom_metrics_path.as_str())
+                        .exclude(custom_telemetry_path.as_str())
+                        .exclude(custom_healthz_path.as_str())
+                        .exclude(custom_readyz_path.as_str())
+                        .exclude(custom_livez_path.as_str()),
                 )
                 .wrap(actix_telemetry::ActixTelemetryTransform::new(
                     actix_telemetry_collector.clone(),
@@ -141,32 +201,21 @@ pub fn init(
                 .app_data(validate_json_config)
                 .app_data(TempFileConfig::default().directory(&upload_dir))
                 .app_data(MultipartFormConfig::default().total_limit(usize::MAX))
-                .app_data(service_config.clone())
-                .service(index)
-                .configure(config_collections_api)
-                .configure(config_snapshots_api)
-                .configure(config_update_api)
-                .configure(config_cluster_api)
-                .configure(config_service_api)
-                .configure(config_search_api)
-                .configure(config_recommend_api)
-                .configure(config_discover_api)
-                .configure(config_query_api)
-                .configure(config_facet_api)
-                .configure(config_shards_api)
-                .configure(config_issues_api)
-                .configure(config_debugger_api)
-                .configure(config_profiler_api)
-                .configure(config_local_shard_api)
-                // Ordering of services is important for correct path pattern matching
-                // See: <https://github.com/qdrant/qdrant/issues/3543>
-                .service(scroll_points)
-                .service(count_points)
-                .service(get_point)
-                .service(get_points);
+                .app_data(service_config.clone());
 
-            if let Some(static_folder) = web_ui_available.as_deref() {
-                app = app.service(web_ui_factory(static_folder));
+            app = app.configure(configure_api);
+            if let Some(static_folder) = static_folder_opt.clone() {
+                // Always keep legacy path for Web UI assets/runtime assumptions.
+                app = app.service(web_ui_factory(static_folder.clone(), WEB_UI_PATH.to_string()));
+
+                // Optionally expose UI under custom prefixed entrypoint as an alias.
+                if custom_web_ui_path != WEB_UI_PATH {
+                    app = app.service(web_ui_factory(static_folder, custom_web_ui_path.clone()));
+                }
+            }
+
+            if base_path != "/" {
+                app = app.service(web::scope(base_path.as_str()).configure(configure_api));
             }
 
             app
@@ -265,6 +314,11 @@ fn validation_error_handler(
 #[cfg(test)]
 mod tests {
     use ::api::grpc::api_crate_version;
+    use actix_web::http::StatusCode;
+    use actix_web::test::{self, TestRequest};
+    use actix_web::{App, web};
+
+    use super::{configure_api, with_base_path};
 
     #[test]
     fn test_version() {
@@ -273,5 +327,31 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             "Qdrant and lib/api crate versions are not same"
         );
+    }
+
+    #[test]
+    fn test_with_base_path() {
+        assert_eq!(with_base_path("/", "/"), "/");
+        assert_eq!(with_base_path("/", "/healthz"), "/healthz");
+        assert_eq!(with_base_path("/qdrant", "/"), "/qdrant");
+        assert_eq!(with_base_path("/qdrant", "/healthz"), "/qdrant/healthz");
+    }
+
+    #[actix_web::test]
+    async fn test_api_root_and_alias_scope() {
+        let srv = test::init_service(
+            App::new()
+                .configure(configure_api)
+                .service(web::scope("/qdrant").configure(configure_api)),
+        )
+        .await;
+
+        let req = TestRequest::with_uri("/").to_request();
+        let res = test::call_service(&srv, req).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let req = TestRequest::with_uri("/qdrant/").to_request();
+        let res = test::call_service(&srv, req).await;
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

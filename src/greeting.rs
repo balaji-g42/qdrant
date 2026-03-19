@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use api::rest::models::get_git_commit_id;
 use colored::{Color, ColoredString, Colorize};
 
+use crate::actix::web_ui::web_ui_mount_path;
 use crate::settings::Settings;
 
 fn paint_red(text: &str, true_color: bool) -> ColoredString {
@@ -108,15 +109,18 @@ pub fn welcome(settings: &Settings) {
     );
 
     // Print link to web UI
+    let base_path = settings.service.normalized_base_path();
+    let dashboard_path = web_ui_mount_path(&base_path);
     let ui_link = format!(
-        "http{}://{}:{}/dashboard",
+        "http{}://{}:{}{}",
         if settings.service.enable_tls { "s" } else { "" },
         if is_localhost_ip(&settings.service.host) {
             "localhost"
         } else {
             &settings.service.host
         },
-        settings.service.http_port
+        settings.service.http_port,
+        dashboard_path,
     );
 
     println!(

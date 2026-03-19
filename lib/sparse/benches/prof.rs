@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "windows"))]
+
 use std::io::Write;
 use std::os::raw::c_int;
 use std::path::Path;
@@ -73,7 +75,7 @@ impl Profiler for FlamegraphProfiler<'_> {
         options.text_truncate_direction = TextTruncateDirection::Left;
         options.font_size /= 3;
         if let Some(profiler) = self.active_profiler.take() {
-            let report = profiler.report().build().unwrap();
+            let report: pprof::Report = profiler.report().build().unwrap();
 
             let mut file = File::create(pprof_path).unwrap();
             let profile = report.pprof().unwrap();

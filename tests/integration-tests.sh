@@ -73,3 +73,9 @@ pytest tests/openapi --durations=10
 ./tests/basic_multivector_grpc_test.sh
 
 ./tests/basic_query_grpc_test.sh
+
+# Optional: run proxy subpath compatibility checks.
+# Enable with: RUN_BASE_PATH_TEST=1 ./tests/integration-tests.sh
+if [ "${RUN_BASE_PATH_TEST:-0}" == "1" ]; then
+  ./tests/base_path_proxy_compat_test.sh
+fi
