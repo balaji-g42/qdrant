@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use actix_web::dev::HttpServiceFactory;
 use actix_web::http::header::HeaderValue;
 use actix_web::middleware::DefaultHeaders;
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use crate::settings::Settings;
 
@@ -126,7 +126,7 @@ fn index_html_response(static_folder: String, base_path: String) -> HttpResponse
         .body(final_html)
 }
 
-pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpServiceFactory + use<> {
+pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpServiceFactory {
     let static_folder = static_folder.to_string();
     let base_path = mount_path
         .strip_suffix(WEB_UI_PATH)
@@ -141,7 +141,7 @@ pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpService
             web::get().to({
                 let static_folder = static_folder.clone();
                 let base_path = base_path.clone();
-                move || index_html_response(static_folder.clone(), base_path.clone())
+                move |_: HttpRequest| index_html_response(static_folder.clone(), base_path.clone())
             }),
         )
         .route(
@@ -149,7 +149,7 @@ pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpService
             web::get().to({
                 let static_folder = static_folder.clone();
                 let base_path = base_path.clone();
-                move || index_html_response(static_folder.clone(), base_path.clone())
+                move |_: HttpRequest| index_html_response(static_folder.clone(), base_path.clone())
             }),
         )
         .route(
@@ -157,7 +157,7 @@ pub fn web_ui_factory(static_folder: &str, mount_path: &str) -> impl HttpService
             web::get().to({
                 let static_folder = static_folder.clone();
                 let base_path = base_path.clone();
-                move || index_html_response(static_folder.clone(), base_path.clone())
+                move |_: HttpRequest| index_html_response(static_folder.clone(), base_path.clone())
             }),
         )
         .service(actix_files::Files::new("/", static_folder))

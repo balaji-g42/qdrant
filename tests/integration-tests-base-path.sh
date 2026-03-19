@@ -88,4 +88,4 @@ fi
 
 echo "server ready to serve traffic"
 
-TMP_DIR="$TMP_DIR" QDRANT_HOST="$QDRANT_HOST" ./tests/base_path_proxy_compat_test.sh
+./tests/base_path_proxy_compat_test.sh
