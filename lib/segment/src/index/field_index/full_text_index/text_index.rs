@@ -1,4 +1,3 @@
-#[allow(clippy::large_enum_variant)]
 use std::borrow::Cow;
 use std::path::PathBuf;
 #[cfg(feature = "rocksdb")]
@@ -35,6 +34,7 @@ use crate::index::payload_config::{IndexMutability, StorageType};
 use crate::telemetry::PayloadIndexTelemetry;
 use crate::types::{FieldCondition, Match, MatchPhrase, MatchText, PayloadKeyType};
 
+#[allow(clippy::large_enum_variant)]
 pub enum FullTextIndex {
     Mutable(Box<MutableFullTextIndex>),
     Immutable(ImmutableFullTextIndex),
