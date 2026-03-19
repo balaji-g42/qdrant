@@ -71,6 +71,16 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub static_content_dir: Option<String>,
 
+    /// Optional additional Web UI base path prefix.
+    ///
+    /// REST API remains on root paths.
+    ///
+    /// Examples:
+    /// - not set or `/` => Web UI available at `/dashboard`
+    /// - `/qdrant` => Web UI available at both `/dashboard` and `/qdrant/dashboard`
+    #[serde(default)]
+    pub base_path: Option<String>,
+
     /// If serving of the static content is enabled.
     /// This includes the Web-UI. True by default.
     #[serde(default)]
@@ -93,6 +103,33 @@ impl ServiceConfig {
     pub fn hardware_reporting(&self) -> bool {
         self.hardware_reporting.unwrap_or_default()
     }
+
+    pub fn normalized_base_path(&self) -> String {
+        normalize_base_path(self.base_path.as_deref())
+    }
+}
+
+pub fn normalize_base_path(raw: Option<&str>) -> String {
+    let Some(raw) = raw else {
+        return "/".to_string();
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+
+    let without_leading = trimmed.trim_start_matches('/');
+    if without_leading.is_empty() {
+        return "/".to_string();
+    }
+
+    let without_trailing = without_leading.trim_end_matches('/');
+    if without_trailing.is_empty() {
+        return "/".to_string();
+    }
+
+    format!("/{without_trailing}")
 }
 
 #[derive(Debug, Deserialize, Clone, Default, Validate)]
@@ -647,5 +684,19 @@ mod tests {
             config.validate().is_err(),
             "zero timeout values must fail validation"
         );
+    }
+
+    #[test]
+    fn test_normalize_base_path() {
+        assert_eq!(normalize_base_path(None), "/");
+        assert_eq!(normalize_base_path(Some("")), "/");
+        assert_eq!(normalize_base_path(Some("   ")), "/");
+        assert_eq!(normalize_base_path(Some("/")), "/");
+        assert_eq!(normalize_base_path(Some("///")), "/");
+        assert_eq!(normalize_base_path(Some("qdrant")), "/qdrant");
+        assert_eq!(normalize_base_path(Some("/qdrant")), "/qdrant");
+        assert_eq!(normalize_base_path(Some("/qdrant/")), "/qdrant");
+        assert_eq!(normalize_base_path(Some("///qdrant///")), "/qdrant");
+        assert_eq!(normalize_base_path(Some("/api/v1/")), "/api/v1");
     }
 }

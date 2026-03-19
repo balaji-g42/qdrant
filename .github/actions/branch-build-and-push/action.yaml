@@ -54,10 +54,10 @@ runs:
 
         # Authenticate on registries
         if [ "${{ inputs.push-to-dockerhub }}" = "true" ]; then
-          echo "${{ inputs.dockerhub-password }}" | docker login -u generall --password-stdin
+          echo "${{ inputs.dockerhub-password }}" | docker login -u balajig4292 --password-stdin
         fi
         if [ "${{ inputs.push-to-ghcr }}" = "true" ]; then
-          echo "${{ inputs.ghcr-password }}" | docker login ghcr.io -u qdrant --password-stdin
+          echo "${{ inputs.ghcr-password }}" | docker login ghcr.io -u balaji-g42 --password-stdin
         fi
 
         GIT_COMMIT_ID="$(git rev-parse HEAD)"
