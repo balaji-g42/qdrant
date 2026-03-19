@@ -2,6 +2,7 @@
 .idea
 .vscode
 /.devcontainer
+/actions-runner
 /storage
 /snapshots
 /consensus_test_logs
