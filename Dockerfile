@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Enable GPU support.
 # This option can be set to `nvidia` or `amd` to enable GPU support.
 # This option is defined here because it is used in `FROM` instructions.
@@ -40,9 +42,10 @@ COPY --from=xx / /
 # so, please, don't reorder them without prior consideration. 🥲
 
 RUN apt-get update \
-    && apt-get install -y clang lld cmake protobuf-compiler jq \
+    && apt-get install -y --no-install-recommends clang lld cmake protobuf-compiler jq \
     && rustup component add rustfmt \
-    && cargo install cargo-sbom
+    && cargo install cargo-sbom \
+    && rm -rf /var/lib/apt/lists/*
 
 # `ARG`/`ENV` pair is a workaround for `docker build` backward-compatibility.
 #
@@ -108,7 +111,10 @@ COPY --from=planner /qdrant/recipe.json recipe.json
 #
 # https://github.com/tonistiigi/xx/issues/107
 # https://github.com/tonistiigi/xx/pull/108
-RUN PKG_CONFIG="/usr/bin/$(xx-info)-pkg-config" \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/qdrant/target \
+    PKG_CONFIG="/usr/bin/$(xx-info)-pkg-config" \
     PATH="$PATH:/opt/mold/bin" \
     RUSTFLAGS="${LINKER:+-C link-arg=-fuse-ld=}$LINKER ${TARGET_CPU:+-C target-cpu=}$TARGET_CPU $RUSTFLAGS" \
     ${JEMALLOC_SYS_WITH_LG_PAGE:+env JEMALLOC_SYS_WITH_LG_PAGE="${JEMALLOC_SYS_WITH_LG_PAGE}"} \
@@ -121,7 +127,10 @@ ARG GIT_COMMIT_ID
 #
 # https://github.com/tonistiigi/xx/issues/107
 # https://github.com/tonistiigi/xx/pull/108
-RUN PKG_CONFIG="/usr/bin/$(xx-info)-pkg-config" \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/qdrant/target \
+    PKG_CONFIG="/usr/bin/$(xx-info)-pkg-config" \
     PATH="$PATH:/opt/mold/bin" \
     RUSTFLAGS="${LINKER:+-C link-arg=-fuse-ld=}$LINKER ${TARGET_CPU:+-C target-cpu=}$TARGET_CPU $RUSTFLAGS" \
     ${JEMALLOC_SYS_WITH_LG_PAGE:+env JEMALLOC_SYS_WITH_LG_PAGE="${JEMALLOC_SYS_WITH_LG_PAGE}"} \
