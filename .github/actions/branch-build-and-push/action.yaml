@@ -63,18 +63,21 @@ runs:
         GIT_COMMIT_ID="$(git rev-parse HEAD)"
 
         # Build base tags array
-        tags=()
-        if [ "${{ inputs.push-to-ghcr }}" = "true" ]; then
-          tags+=("ghcr.io/baaji-g42/qdrant:${branch}-${GIT_COMMIT_ID}")
-          tags+=("ghcr.io/baaji-g42/qdrant:${branch}")
+        declare -a tags=()
+        PUSH_TO_GHCR="${{ inputs.push-to-ghcr }}"
+        PUSH_TO_DOCKERHUB="${{ inputs.push-to-dockerhub }}"
+
+        if [[ "$PUSH_TO_GHCR" == "true" ]]; then
+          tags+=("ghcr.io/balaji-g42/qdrant:${branch}-${GIT_COMMIT_ID}")
+          tags+=("ghcr.io/balaji-g42/qdrant:${branch}")
         fi
-        if [ "${{ inputs.push-to-dockerhub }}" = "true" ]; then
+        if [[ "$PUSH_TO_DOCKERHUB" == "true" ]]; then
           # Don't push commit tag to Docker Hub to avoid excessive image creation
-          tags+=("baajig4292/qdrant:${branch}")
+          tags+=("balajig4292/qdrant:${branch}")
         fi
 
         # Exit if no tags to build
-        if [ ${#tags[@]} -eq 0 ]; then
+        if [[ ${#tags[@]} -eq 0 ]]; then
           echo "No registry enabled for push"
           exit 1
         fi
