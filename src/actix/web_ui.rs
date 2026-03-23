@@ -92,6 +92,59 @@ fn inject_base_path_runtime(html: &str, base_path: &str) -> String {
     }}
     return originalOpen.call(this, method, url, ...rest);
   }};
+
+  // Rewrite static asset paths (CSS, JS, images, fonts)
+  const rewriteAttribute = (element, attr) => {{
+    const value = element.getAttribute(attr);
+    if (!value || value.startsWith('data:') || value.startsWith('blob:')) return;
+    const rewritten = toPathedUrl(value);
+    if (rewritten !== value) {{
+      element.setAttribute(attr, rewritten);
+    }}
+  }};
+
+  // Process existing elements
+  document.querySelectorAll('link[href], script[src], img[src], source[src], video[src], audio[src], embed[src], object[data]').forEach(el => {{
+    const tagName = el.tagName.toLowerCase();
+    if (tagName === 'link') {{
+      rewriteAttribute(el, 'href');
+    }} else {{
+      rewriteAttribute(el, 'src');
+    }}
+    if (el.hasAttribute('data')) {{
+      rewriteAttribute(el, 'data');
+    }}
+  }});
+
+  // Watch for dynamically added elements
+  const observer = new MutationObserver(mutations => {{
+    mutations.forEach(mutation => {{
+      mutation.addedNodes.forEach(node => {{
+        if (node.nodeType === 1) {{
+          const tagName = node.tagName.toLowerCase();
+          if (tagName === 'link') {{
+            rewriteAttribute(node, 'href');
+          }} else if (tagName === 'script' || tagName === 'img' || tagName === 'source' || tagName === 'video' || tagName === 'audio' || tagName === 'embed') {{
+            rewriteAttribute(node, 'src');
+          }} else if (tagName === 'object') {{
+            rewriteAttribute(node, 'data');
+          }}
+          node.querySelectorAll && node.querySelectorAll('link[href], script[src], img[src], source[src], video[src], audio[src], embed[src], object[data]').forEach(el => {{
+            const elTagName = el.tagName.toLowerCase();
+            if (elTagName === 'link') {{
+              rewriteAttribute(el, 'href');
+            }} else {{
+              rewriteAttribute(el, 'src');
+            }}
+            if (el.hasAttribute('data')) {{
+              rewriteAttribute(el, 'data');
+            }}
+          }});
+        }}
+      }});
+    }});
+  }});
+  observer.observe(document.documentElement, {{ childList: true, subtree: true }});
 }})();
 </script>"
     );
@@ -317,5 +370,27 @@ mod tests {
         assert!(injected.contains("const BASE_PATH = \"/qdrant\";"));
         assert!(injected.contains("window.fetch"));
         assert!(injected.contains("XMLHttpRequest.prototype.open"));
+        // Verify static asset rewriting functionality
+        assert!(injected.contains("rewriteAttribute"));
+        assert!(injected.contains("MutationObserver"));
+        assert!(injected.contains("link[href]"));
+        assert!(injected.contains("script[src]"));
+        assert!(injected.contains("img[src]"));
+    }
+
+    #[test]
+    fn test_inject_base_path_runtime_rewrites_static_assets() {
+        let html = r#"<html><head><link href="/dashboard/styles.css"><script src="/dashboard/app.js"></script></head><body><img src="/dashboard/logo.png"></body></html>"#;
+
+        let injected = inject_base_path_runtime(html, "/qdrant");
+        // Verify the base path is set correctly
+        assert!(injected.contains("const BASE_PATH = \"/qdrant\";"));
+        // Verify the rewrite function exists
+        assert!(injected.contains("const toPathedUrl = (url) =>"));
+        assert!(injected.contains("parsed.pathname = BASE_PATH + path"));
+        // Verify static asset selectors are present
+        assert!(injected.contains("link[href]"));
+        assert!(injected.contains("script[src]"));
+        assert!(injected.contains("img[src]"));
     }
 }
